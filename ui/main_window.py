@@ -1,0 +1,406 @@
+from __future__ import annotations
+
+import tkinter as tk
+from tkinter import ttk
+from tkinter.scrolledtext import ScrolledText
+from typing import Callable, Optional
+
+
+class MainWindow(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("STM32U575 模拟打印上位机")
+        self.geometry("1560x980")
+        self.minsize(1320, 860)
+
+        # callbacks
+        self.on_refresh_ports: Optional[Callable[[], None]] = None
+        self.on_toggle_uart1: Optional[Callable[[], None]] = None
+        self.on_toggle_uart2: Optional[Callable[[], None]] = None
+        self.on_send_text: Optional[Callable[[], None]] = None
+        self.on_send_hex: Optional[Callable[[], None]] = None
+        self.on_send_init: Optional[Callable[[], None]] = None
+        self.on_send_align_left: Optional[Callable[[], None]] = None
+        self.on_send_align_center: Optional[Callable[[], None]] = None
+        self.on_send_align_right: Optional[Callable[[], None]] = None
+        self.on_send_trigger_lf: Optional[Callable[[], None]] = None
+        self.on_send_trigger_ff: Optional[Callable[[], None]] = None
+        self.on_send_line_spacing: Optional[Callable[[], None]] = None
+        self.on_send_left_margin: Optional[Callable[[], None]] = None
+        self.on_send_right_margin: Optional[Callable[[], None]] = None
+        self.on_send_scale: Optional[Callable[[], None]] = None
+        self.on_send_test_receipt: Optional[Callable[[], None]] = None
+        self.on_receipt_template_changed: Optional[Callable[[], None]] = None
+        self.on_start_new_receipt: Optional[Callable[[], None]] = None
+        self.on_clear_history_frames: Optional[Callable[[], None]] = None
+        self.on_preview_option_changed: Optional[Callable[[], None]] = None
+
+        self._build_vars()
+        self._build_ui()
+
+    def _build_vars(self):
+        self.port1_var = tk.StringVar()
+        self.port2_var = tk.StringVar()
+        self.baud1_var = tk.StringVar(value="115200")
+        self.baud2_var = tk.StringVar(value="115200")
+        self.status_var = tk.StringVar(value="就绪")
+        self.text_to_send = tk.StringVar()
+        self.hex_to_send = tk.StringVar()
+        self.append_crlf_var = tk.BooleanVar(value=False)
+        self.line_spacing_var = tk.StringVar(value="8")
+        self.left_margin_var = tk.StringVar(value="0")
+        self.right_margin_var = tk.StringVar(value="0")
+        self.scale_var = tk.StringVar(value="1")
+        self.preview_info_var = tk.StringVar(value="尚未收到打印帧")
+        self.auto_crop_var = tk.BooleanVar(value=False)
+        self.zoom_var = tk.IntVar(value=4)
+
+        self.receipt_template_var = tk.StringVar(value="default")
+        self.receipt_title_var = tk.StringVar(value="YINJIAN DRINKS")
+        self.receipt_date_var = tk.StringVar(value="2026-03-20")
+        self.receipt_no_var = tk.StringVar(value="1234567890")
+        self.receipt_total_var = tk.StringVar(value="23.00")
+        self.receipt_cash_var = tk.StringVar(value="50.00")
+        self.receipt_change_var = tk.StringVar(value="27.00")
+
+    def _build_ui(self):
+        self.columnconfigure(0, weight=0)
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        left_container = ttk.Frame(self)
+        left_container.grid(row=0, column=0, sticky="ns")
+
+        self.left_canvas = tk.Canvas(left_container, highlightthickness=0, width=600)
+        left_scrollbar = ttk.Scrollbar(left_container, orient="vertical", command=self.left_canvas.yview)
+        self.left_canvas.configure(yscrollcommand=left_scrollbar.set)
+        self.left_canvas.grid(row=0, column=0, sticky="ns")
+        left_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        left_container.rowconfigure(0, weight=1)
+        left_container.columnconfigure(0, weight=1)
+
+        self.left_inner = ttk.Frame(self.left_canvas, padding=10)
+        self.left_window = self.left_canvas.create_window((0, 0), window=self.left_inner, anchor="nw")
+
+        def _sync_left_scrollregion(event=None):
+            self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
+
+        def _resize_left_inner(event):
+            self.left_canvas.itemconfigure(self.left_window, width=event.width)
+
+        self.left_inner.bind("<Configure>", _sync_left_scrollregion)
+        self.left_canvas.bind("<Configure>", _resize_left_inner)
+        self._bind_left_canvas_mousewheel(self.left_canvas, self.left_inner)
+
+        right = ttk.Frame(self, padding=10)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=3)
+        right.rowconfigure(2, weight=4)
+        right.rowconfigure(3, weight=2)
+
+        serial_frame = ttk.LabelFrame(self.left_inner, text="串口连接", padding=10)
+        serial_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(serial_frame, text="UART1 端口").grid(row=0, column=0, sticky="w")
+        ttk.Label(serial_frame, text="UART2 端口").grid(row=1, column=0, sticky="w")
+        self.port1_combo = ttk.Combobox(serial_frame, textvariable=self.port1_var, width=18, state="readonly")
+        self.port2_combo = ttk.Combobox(serial_frame, textvariable=self.port2_var, width=18, state="readonly")
+        self.port1_combo.grid(row=0, column=1, padx=5, pady=2)
+        self.port2_combo.grid(row=1, column=1, padx=5, pady=2)
+        ttk.Label(serial_frame, text="波特率").grid(row=0, column=2, sticky="w")
+        ttk.Label(serial_frame, text="波特率").grid(row=1, column=2, sticky="w")
+        ttk.Entry(serial_frame, textvariable=self.baud1_var, width=10).grid(row=0, column=3, padx=5, pady=2)
+        ttk.Entry(serial_frame, textvariable=self.baud2_var, width=10).grid(row=1, column=3, padx=5, pady=2)
+        ttk.Button(serial_frame, text="刷新端口", command=self._safe_call(lambda: self.on_refresh_ports)).grid(row=0, column=4, rowspan=2, padx=8)
+        self.btn_connect1 = ttk.Button(serial_frame, text="连接 UART1", command=self._safe_call(lambda: self.on_toggle_uart1))
+        self.btn_connect2 = ttk.Button(serial_frame, text="连接 UART2", command=self._safe_call(lambda: self.on_toggle_uart2))
+        self.btn_connect1.grid(row=2, column=1, pady=(8, 0), sticky="ew")
+        self.btn_connect2.grid(row=2, column=3, pady=(8, 0), sticky="ew")
+        ttk.Label(serial_frame, textvariable=self.status_var, foreground="#0066cc").grid(row=3, column=0, columnspan=5, sticky="w", pady=(8, 0))
+
+        send_text_frame = ttk.LabelFrame(self.left_inner, text="发送普通文本（UART1）", padding=10)
+        send_text_frame.pack(fill="x", pady=(0, 10))
+        ttk.Entry(send_text_frame, textvariable=self.text_to_send, width=40).grid(row=0, column=0, columnspan=3, sticky="ew")
+        ttk.Checkbutton(send_text_frame, text="追加 CRLF", variable=self.append_crlf_var).grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Button(send_text_frame, text="发送文本", command=self._safe_call(lambda: self.on_send_text)).grid(row=1, column=2, sticky="e")
+        ttk.Label(send_text_frame, text="说明：当前 MCU 字库主要支持 ASCII 0x20~0x7E；建议按“段”发送文本，再触发打印。").grid(row=2, column=0, columnspan=3, sticky="w")
+
+        send_hex_frame = ttk.LabelFrame(self.left_inner, text="发送十六进制命令（UART1）", padding=10)
+        send_hex_frame.pack(fill="x", pady=(0, 10))
+        ttk.Entry(send_hex_frame, textvariable=self.hex_to_send, width=40).grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Button(send_hex_frame, text="发送 HEX", command=self._safe_call(lambda: self.on_send_hex)).grid(row=0, column=2, padx=(8, 0))
+        ttk.Label(send_hex_frame, text="示例：0A 00 / 1B 40 / 1B 61 01 / 1B 33 08").grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        quick_frame = ttk.LabelFrame(self.left_inner, text="标准 / 近标准命令", padding=10)
+        quick_frame.pack(fill="x", pady=(0, 10))
+        ttk.Button(quick_frame, text="ESC @ (初始化)", command=self._safe_call(lambda: self.on_send_init)).grid(row=0, column=0, sticky="ew", padx=2, pady=2)
+        ttk.Button(quick_frame, text="左对齐 ESC a 0", command=self._safe_call(lambda: self.on_send_align_left)).grid(row=1, column=0, sticky="ew", padx=2, pady=2)
+        ttk.Button(quick_frame, text="居中 ESC a 1", command=self._safe_call(lambda: self.on_send_align_center)).grid(row=1, column=1, sticky="ew", padx=2, pady=2)
+        ttk.Button(quick_frame, text="右对齐 ESC a 2", command=self._safe_call(lambda: self.on_send_align_right)).grid(row=1, column=2, sticky="ew", padx=2, pady=2)
+        ttk.Button(quick_frame, text="打印 0A 00 (项目触发)", command=self._safe_call(lambda: self.on_send_trigger_lf)).grid(row=2, column=0, sticky="ew", padx=2, pady=2)
+        ttk.Button(quick_frame, text="打印 0C 00 (项目触发)", command=self._safe_call(lambda: self.on_send_trigger_ff)).grid(row=2, column=1, sticky="ew", padx=2, pady=2)
+        ttk.Label(quick_frame, text="说明：0A 00 / 0C 00 为当前项目的简化打印触发命令，不属于标准 ESC/POS。").grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        receipt_frame = ttk.LabelFrame(self.left_inner, text="测试小票模板", padding=10)
+        receipt_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(receipt_frame, text="模板").grid(row=0, column=0, sticky="w")
+        self.receipt_template_combo = ttk.Combobox(
+            receipt_frame,
+            textvariable=self.receipt_template_var,
+            state="readonly",
+            width=24,
+        )
+        self.receipt_template_combo.grid(row=0, column=1, padx=6, sticky="ew")
+        self.receipt_template_combo.bind("<<ComboboxSelected>>", self._on_receipt_template_selected)
+        ttk.Button(receipt_frame, text="打印测试小票", command=self._safe_call(lambda: self.on_send_test_receipt)).grid(row=0, column=2, sticky="ew")
+        ttk.Label(receipt_frame, text="可选模板：default / compact / simple_center。下方参数会随模板切换自动回填。", foreground="#555555").grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        receipt_frame.columnconfigure(1, weight=1)
+
+        receipt_param_frame = ttk.LabelFrame(self.left_inner, text="测试票参数", padding=10)
+        receipt_param_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(receipt_param_frame, text="标题").grid(row=0, column=0, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_title_var).grid(row=0, column=1, columnspan=3, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="日期").grid(row=1, column=0, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_date_var, width=18).grid(row=1, column=1, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="编号").grid(row=1, column=2, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_no_var, width=18).grid(row=1, column=3, sticky="ew", padx=4, pady=2)
+
+        ttk.Label(receipt_param_frame, text="总价").grid(row=2, column=0, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_total_var, width=18).grid(row=2, column=1, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="现金").grid(row=2, column=2, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_cash_var, width=18).grid(row=2, column=3, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="找零").grid(row=3, column=0, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_change_var, width=18).grid(row=3, column=1, sticky="ew", padx=4, pady=2)
+
+        ttk.Label(receipt_param_frame, text="明细（多行）").grid(row=4, column=0, sticky="nw", pady=(6, 0))
+        self.receipt_items_text = ScrolledText(receipt_param_frame, height=6, width=44, font=("Consolas", 10))
+        self.receipt_items_text.grid(row=4, column=1, columnspan=3, sticky="ew", padx=4, pady=(6, 2))
+        ttk.Label(receipt_param_frame, text="尾部文案（多行）").grid(row=5, column=0, sticky="nw", pady=(6, 0))
+        self.receipt_footer_text = ScrolledText(receipt_param_frame, height=3, width=44, font=("Consolas", 10))
+        self.receipt_footer_text.grid(row=5, column=1, columnspan=3, sticky="ew", padx=4, pady=(6, 2))
+        ttk.Label(receipt_param_frame, text="提示：这里改的是测试票内容，不影响 UART1 普通文本发送区。", foreground="#555555").grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        for i in range(4):
+            receipt_param_frame.columnconfigure(i, weight=1 if i else 0)
+
+        param_frame = ttk.LabelFrame(self.left_inner, text="项目自定义参数命令", padding=10)
+        param_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(param_frame, text="行距 n").grid(row=0, column=0, sticky="w")
+        ttk.Entry(param_frame, textvariable=self.line_spacing_var, width=8).grid(row=0, column=1, sticky="w")
+        ttk.Button(param_frame, text="发送 ESC 3 n", command=self._safe_call(lambda: self.on_send_line_spacing)).grid(row=0, column=2, padx=4)
+        ttk.Label(param_frame, text="左边距 n").grid(row=1, column=0, sticky="w")
+        ttk.Entry(param_frame, textvariable=self.left_margin_var, width=8).grid(row=1, column=1, sticky="w")
+        ttk.Button(param_frame, text="发送 ESC L n", command=self._safe_call(lambda: self.on_send_left_margin)).grid(row=1, column=2, padx=4)
+        ttk.Label(param_frame, text="右边距 n").grid(row=2, column=0, sticky="w")
+        ttk.Entry(param_frame, textvariable=self.right_margin_var, width=8).grid(row=2, column=1, sticky="w")
+        ttk.Button(param_frame, text="发送 ESC r n", command=self._safe_call(lambda: self.on_send_right_margin)).grid(row=2, column=2, padx=4)
+        ttk.Label(param_frame, text="放大倍数").grid(row=3, column=0, sticky="w")
+        ttk.Entry(param_frame, textvariable=self.scale_var, width=8).grid(row=3, column=1, sticky="w")
+        ttk.Button(param_frame, text="发送 ESC E n", command=self._safe_call(lambda: self.on_send_scale)).grid(row=3, column=2, padx=4)
+        ttk.Label(param_frame, text="说明：ESC L / ESC r / ESC E 为当前项目自定义语义，不等同于标准 ESC/POS 原义。").grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        log_frame = ttk.LabelFrame(self.left_inner, text="UART1 日志", padding=8)
+        log_frame.pack(fill="both", expand=True)
+        self.log_text = ScrolledText(log_frame, width=60, height=22, font=("Consolas", 10))
+        self.log_text.pack(fill="both", expand=True)
+        self.log_text.configure(state="disabled")
+        self._bind_text_mousewheel(self.log_text)
+
+        info_frame = ttk.Frame(right)
+        info_frame.grid(row=0, column=0, sticky="ew")
+        info_frame.columnconfigure(1, weight=1)
+        ttk.Label(info_frame, text="当前打印段预览").grid(row=0, column=0, sticky="w")
+        ttk.Label(info_frame, textvariable=self.preview_info_var, foreground="#006600").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ttk.Checkbutton(info_frame, text="SETTINGS 自动裁边（会隐藏对齐效果，仅调试时使用）", variable=self.auto_crop_var, command=self._safe_call(lambda: self.on_preview_option_changed)).grid(row=0, column=2, padx=(10, 0))
+        ttk.Label(info_frame, text="缩放").grid(row=0, column=3, padx=(20, 2))
+        zoom_spin = ttk.Spinbox(info_frame, from_=1, to=20, textvariable=self.zoom_var, width=6, command=self._safe_call(lambda: self.on_preview_option_changed))
+        zoom_spin.grid(row=0, column=4)
+        ttk.Button(info_frame, text="开始新小票", command=self._safe_call(lambda: self.on_start_new_receipt)).grid(row=0, column=5, padx=(16, 4))
+        ttk.Button(info_frame, text="清空历史预览", command=self._safe_call(lambda: self.on_clear_history_frames)).grid(row=0, column=6, padx=(4, 0))
+
+        preview_frame = ttk.LabelFrame(right, text="当前打印段预览", padding=8)
+        preview_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 8))
+        preview_frame.rowconfigure(0, weight=1)
+        preview_frame.columnconfigure(0, weight=1)
+        self.preview_canvas = tk.Canvas(preview_frame, bg="white")
+        self.preview_canvas.grid(row=0, column=0, sticky="nsew")
+
+        history_frame = ttk.LabelFrame(right, text="小票历史累计预览", padding=8)
+        history_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
+        history_frame.rowconfigure(0, weight=1)
+        history_frame.columnconfigure(0, weight=1)
+        self.history_canvas = tk.Canvas(history_frame, bg="#fafafa", highlightthickness=1, highlightbackground="#d0d0d0")
+        self.history_canvas.grid(row=0, column=0, sticky="nsew")
+        history_scrollbar = ttk.Scrollbar(history_frame, orient="vertical", command=self.history_canvas.yview)
+        history_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.history_canvas.configure(yscrollcommand=history_scrollbar.set)
+        self._bind_text_mousewheel(self.history_canvas)
+
+        raw_frame = ttk.LabelFrame(right, text="UART2 原始文本", padding=8)
+        raw_frame.grid(row=3, column=0, sticky="nsew")
+        raw_frame.rowconfigure(0, weight=1)
+        raw_frame.columnconfigure(0, weight=1)
+        self.raw_uart2_text = ScrolledText(raw_frame, width=90, height=10, font=("Consolas", 9))
+        self.raw_uart2_text.grid(row=0, column=0, sticky="nsew")
+        self.raw_uart2_text.configure(state="disabled")
+        self._bind_text_mousewheel(self.raw_uart2_text)
+
+    def _on_receipt_template_selected(self, _event=None):
+        if self.on_receipt_template_changed:
+            self.on_receipt_template_changed()
+
+    def _safe_call(self, cb_getter: Callable[[], Optional[Callable[[], None]]]):
+        def _wrapped():
+            cb = cb_getter()
+            if cb:
+                cb()
+        return _wrapped
+
+    def _bind_text_mousewheel(self, widget):
+        def _on_mousewheel(event):
+            widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+        def _on_linux_up(event):
+            widget.yview_scroll(-1, "units")
+            return "break"
+        def _on_linux_down(event):
+            widget.yview_scroll(1, "units")
+            return "break"
+        widget.bind("<MouseWheel>", _on_mousewheel)
+        widget.bind("<Button-4>", _on_linux_up)
+        widget.bind("<Button-5>", _on_linux_down)
+
+    def _bind_left_canvas_mousewheel(self, canvas, inner_widget):
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+        def _on_linux_up(event):
+            canvas.yview_scroll(-1, "units")
+            return "break"
+        def _on_linux_down(event):
+            canvas.yview_scroll(1, "units")
+            return "break"
+        def _bind_all_handlers(_event=None):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Button-4>", _on_linux_up)
+            canvas.bind_all("<Button-5>", _on_linux_down)
+        def _unbind_all_handlers(_event=None):
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+        canvas.bind("<Enter>", _bind_all_handlers)
+        inner_widget.bind("<Enter>", _bind_all_handlers)
+        canvas.bind("<Leave>", _unbind_all_handlers)
+        inner_widget.bind("<Leave>", _unbind_all_handlers)
+
+    # ===== 供 controller 调用的 UI 更新接口 =====
+    def set_ports(self, ports: list[str]):
+        self.port1_combo["values"] = ports
+        self.port2_combo["values"] = ports
+        if ports:
+            if not self.port1_var.get():
+                self.port1_var.set(ports[0])
+            if not self.port2_var.get():
+                self.port2_var.set(ports[0])
+
+    def set_receipt_templates(self, templates: list[str], default_template: str = "default"):
+        self.receipt_template_combo["values"] = templates
+        if default_template in templates:
+            self.receipt_template_var.set(default_template)
+        elif templates:
+            self.receipt_template_var.set(templates[0])
+        else:
+            self.receipt_template_var.set("")
+
+    def set_receipt_template(self, template_name: str):
+        self.receipt_template_var.set(template_name)
+
+    def set_receipt_form_defaults(self, data: dict[str, str]):
+        self.receipt_title_var.set(data.get("title", ""))
+        self.receipt_date_var.set(data.get("date", ""))
+        self.receipt_no_var.set(data.get("receipt_no", ""))
+        self.receipt_total_var.set(data.get("total", ""))
+        self.receipt_cash_var.set(data.get("cash", ""))
+        self.receipt_change_var.set(data.get("change", ""))
+        self.receipt_items_text.delete("1.0", "end")
+        self.receipt_items_text.insert("1.0", data.get("items_text", ""))
+        self.receipt_footer_text.delete("1.0", "end")
+        self.receipt_footer_text.insert("1.0", data.get("footer", ""))
+
+    def set_status(self, text: str):
+        self.status_var.set(text)
+
+    def set_uart1_connected(self, connected: bool):
+        self.btn_connect1.config(text="断开 UART1" if connected else "连接 UART1")
+
+    def set_uart2_connected(self, connected: bool):
+        self.btn_connect2.config(text="断开 UART2" if connected else "连接 UART2")
+
+    def append_log(self, text: str):
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", text)
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def append_uart2_raw(self, text: str):
+        self.raw_uart2_text.configure(state="normal")
+        self.raw_uart2_text.insert("end", text)
+        self.raw_uart2_text.see("end")
+        self.raw_uart2_text.configure(state="disabled")
+
+    def clear_history_preview(self):
+        self.history_canvas.delete("all")
+
+    def get_uart1_port(self) -> str:
+        return self.port1_var.get().strip()
+
+    def get_uart2_port(self) -> str:
+        return self.port2_var.get().strip()
+
+    def get_uart1_baud(self) -> int:
+        return int(self.baud1_var.get())
+
+    def get_uart2_baud(self) -> int:
+        return int(self.baud2_var.get())
+
+    def get_send_text(self) -> str:
+        return self.text_to_send.get()
+
+    def get_append_crlf(self) -> bool:
+        return bool(self.append_crlf_var.get())
+
+    def get_send_hex(self) -> str:
+        return self.hex_to_send.get().strip()
+
+    def get_line_spacing(self) -> str:
+        return self.line_spacing_var.get()
+
+    def get_left_margin(self) -> str:
+        return self.left_margin_var.get()
+
+    def get_right_margin(self) -> str:
+        return self.right_margin_var.get()
+
+    def get_scale(self) -> str:
+        return self.scale_var.get()
+
+    def get_receipt_template(self) -> str:
+        return self.receipt_template_var.get().strip()
+
+    def get_receipt_form_data(self) -> dict[str, str]:
+        return {
+            "title": self.receipt_title_var.get().strip(),
+            "date": self.receipt_date_var.get().strip(),
+            "receipt_no": self.receipt_no_var.get().strip(),
+            "items_text": self.receipt_items_text.get("1.0", "end").strip(),
+            "total": self.receipt_total_var.get().strip(),
+            "cash": self.receipt_cash_var.get().strip(),
+            "change": self.receipt_change_var.get().strip(),
+            "footer": self.receipt_footer_text.get("1.0", "end").strip(),
+        }
+
+    def get_zoom(self) -> int:
+        return int(self.zoom_var.get())
+
+    def get_auto_crop(self) -> bool:
+        return bool(self.auto_crop_var.get())

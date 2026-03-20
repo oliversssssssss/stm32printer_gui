@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"name": "printer_gui_pc",
+			"path": ".."
+		}
+	],
+	"settings": {
+		"stm32cube-ide-clangd.path": "cube"
+	}
+}
