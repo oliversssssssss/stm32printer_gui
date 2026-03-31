@@ -67,7 +67,7 @@ class SendPlan:
 
 @dataclass(frozen=True)
 class BlockStyle:
-    align: str = "left"  # left / center / right
+    align: str = "left"
     scale: int = 1
     line_spacing: int = 0
     margin_left: int = 0
@@ -108,14 +108,17 @@ class ReceiptFormData:
 class ReceiptBuilder:
     """构造 block 化测试小票与发送计划。
 
-    这一版重点：
-    1. 支持模板选择（default / compact / simple_center）
-    2. 支持 GUI 参数化测试票内容，而不是只能打印硬编码样例
-    3. 继续保持 block -> settings -> text -> trigger 的 MCU 友好策略
-    4. 对 block style 做最小化命令输出，减少冗余 step
+    这一版只做排版增强，不改发送策略：
+    1. 标题 / 信息区 / 表头 / 明细 / 合计 / 尾部做明确区分
+    2. 商品行支持按列格式化，避免全部挤成一块
+    3. 保持原有 block-step 发送行为不变，尽量不碰稳定基线
     """
 
-    _HR = "-" * 24
+    RECEIPT_WIDTH = 24
+    ITEM_NAME_WIDTH = 12
+    ITEM_QTY_WIDTH = 5
+    ITEM_PRICE_WIDTH = 7
+    _HR = "-" * RECEIPT_WIDTH
 
     def __init__(self):
         self._templates: Dict[str, Callable[[ReceiptFormData], Receipt]] = {
@@ -124,12 +127,10 @@ class ReceiptBuilder:
             "simple_center": self._build_simple_center_receipt,
         }
 
-    # ===== 对外 API =====
     def list_templates(self) -> List[str]:
         return list(self._templates.keys())
 
     def build_test_receipt(self) -> Receipt:
-        """兼容旧调用，默认仍返回标准测试小票。"""
         return self.build_receipt("default")
 
     def get_template_form_defaults(self, template_name: str = "default") -> Dict[str, str]:
@@ -168,14 +169,13 @@ class ReceiptBuilder:
 
         return plan
 
-    # ===== 模板默认值 =====
     def _default_form_data(self, template_name: str) -> ReceiptFormData:
         if template_name == "compact":
             return ReceiptFormData(
                 title="YINJIAN DRINKS",
                 date="2026-03-20",
                 receipt_no="1234567890",
-                items_text="COLA      1    3.00\nMILK      1   10.00",
+                items_text="COLA 1 3.00\nMILK 1 10.00",
                 total="13.00",
                 cash="20.00",
                 change="7.00",
@@ -197,9 +197,9 @@ class ReceiptBuilder:
             date="2026-03-20",
             receipt_no="1234567890",
             items_text=(
-                "COLA      1    3.00\n"
-                "BREAD     2    5.00\n"
-                "MILK      1   10.00"
+                "COLA 1 3.00\n"
+                "BREAD 2 5.00\n"
+                "MILK 1 10.00"
             ),
             total="23.00",
             cash="50.00",
@@ -230,63 +230,140 @@ class ReceiptBuilder:
     def _split_nonempty_lines(text: str) -> List[str]:
         return [line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n") if line.strip()]
 
-    # ===== 模板层 =====
+    def _fit_text(self, text: str, width: int) -> str:
+        text = (text or "").strip()
+        if len(text) <= width:
+            return text
+        if width <= 1:
+            return text[:width]
+        return text[: width - 1] + "~"
+
+    def _pad_lr(self, left: str, right: str, width: int) -> str:
+        left = (left or "").strip()
+        right = (right or "").strip()
+        if len(left) + len(right) >= width:
+            available_left = max(0, width - len(right) - 1)
+            left = self._fit_text(left, available_left)
+        spaces = max(1, width - len(left) - len(right))
+        return f"{left}{' ' * spaces}{right}"
+
+    def _wrap_name(self, name: str, width: int) -> List[str]:
+        name = (name or "").strip()
+        if not name:
+            return [""]
+        return [name[i:i + width] for i in range(0, len(name), width)]
+
+    def _parse_item_line(self, line: str) -> tuple[str, str, str]:
+        s = line.strip()
+        if not s:
+            return "", "", ""
+
+        for sep in ("|", "\t", ","):
+            if sep in s:
+                parts = [p.strip() for p in s.split(sep) if p.strip()]
+                if len(parts) >= 3:
+                    return parts[0], parts[1], parts[2]
+
+        parts = s.split()
+        if len(parts) >= 3:
+            price = parts[-1]
+            qty = parts[-2]
+            name = " ".join(parts[:-2])
+            return name, qty, price
+
+        return s, "", ""
+
+    def _format_item_rows(self, items_text: str) -> List[str]:
+        rows: List[str] = []
+        for raw_line in self._split_nonempty_lines(items_text):
+            name, qty, price = self._parse_item_line(raw_line)
+            name_lines = self._wrap_name(name, self.ITEM_NAME_WIDTH)
+            first_name = self._fit_text(name_lines[0], self.ITEM_NAME_WIDTH)
+            rows.append(
+                f"{first_name:<{self.ITEM_NAME_WIDTH}}"
+                f"{qty:>{self.ITEM_QTY_WIDTH}}"
+                f"{price:>{self.ITEM_PRICE_WIDTH}}"
+            )
+            for extra_name in name_lines[1:]:
+                rows.append(f"{extra_name:<{self.ITEM_NAME_WIDTH}}")
+        return rows
+
+    def _format_money_line(self, label: str, value: str) -> str:
+        return self._pad_lr(label, value, self.RECEIPT_WIDTH)
+
     def _build_default_receipt(self, data: ReceiptFormData) -> Receipt:
-        header_lines: List[str] = []
+        meta_lines: List[str] = []
         if data.date:
-            header_lines.append(f"DATE: {data.date}")
+            meta_lines.append(self._pad_lr("DATE", data.date, self.RECEIPT_WIDTH))
         if data.receipt_no:
-            header_lines.append(f"NO: {data.receipt_no}")
+            meta_lines.append(self._pad_lr("RECEIPT NO", data.receipt_no, self.RECEIPT_WIDTH))
 
-        footer_lines = self._split_nonempty_lines(data.footer)
-        item_lines = self._split_nonempty_lines(data.items_text)
-
-        blocks: List[ReceiptBlock] = [
-            self.title_block(data.title or "TITLE", scale=2, force_reset_style=True),
-        ]
-        if header_lines:
-            blocks.append(self.text_block(header_lines))
-        blocks.extend([
-            self.rule_block(),
-            self.text_block(["ITEM    QTY   PRICE"]),
-        ])
-        if item_lines:
-            blocks.append(self.text_block(item_lines))
-        blocks.append(self.rule_block())
-        if data.total:
-            blocks.append(self.total_block(f"TOTAL: {data.total}", scale=2, force_reset_style=True))
-        if data.cash or data.change:
-            cash_line = f"CASH: {data.cash or '-'}  CHANGE: {data.change or '-'}"
-            blocks.append(self.text_block([cash_line]))
-        if footer_lines:
-            blocks.append(self.center_block(footer_lines))
-
-        return Receipt(
-            name="default",
-            description="标准联调用测试小票，覆盖标题/明细/总价/结束语，可由 GUI 自定义内容",
-            blocks=blocks,
-        )
-
-    def _build_compact_receipt(self, data: ReceiptFormData) -> Receipt:
-        lines: List[str] = []
-        if data.date:
-            lines.append(f"DATE: {data.date}")
-        if data.receipt_no:
-            lines.append(f"NO: {data.receipt_no}")
+        item_lines = self._format_item_rows(data.items_text)
         footer_lines = self._split_nonempty_lines(data.footer) or ["THANK YOU"]
 
         blocks: List[ReceiptBlock] = [
             self.title_block(data.title or "TITLE", scale=2, force_reset_style=True),
+            self.center_block(["SALES RECEIPT"], scale=1),
         ]
-        if lines:
-            blocks.append(self.text_block(lines))
+
+        if meta_lines:
+            blocks.append(self.text_block(meta_lines, align="left", scale=1, force_reset_style=True))
+
+        blocks.extend([
+            self.rule_block(),
+            self.text_block([
+                f"{'ITEM':<{self.ITEM_NAME_WIDTH}}{'QTY':>{self.ITEM_QTY_WIDTH}}{'PRICE':>{self.ITEM_PRICE_WIDTH}}"
+            ], align="left", scale=1, force_reset_style=True),
+            self.rule_block(),
+        ])
+
+        if item_lines:
+            blocks.append(self.text_block(item_lines, align="left", scale=1))
+
+        blocks.append(self.rule_block())
+
         if data.total:
-            blocks.append(self.total_block(f"TOTAL: {data.total}", scale=2, force_reset_style=True))
-        blocks.append(self.center_block(footer_lines))
+            blocks.append(self.center_block([f"TOTAL {data.total}"], scale=2, force_reset_style=True))
+
+        money_lines: List[str] = []
+        if data.cash:
+            money_lines.append(self._format_money_line("CASH", data.cash))
+        if data.change:
+            money_lines.append(self._format_money_line("CHANGE", data.change))
+        if money_lines:
+            blocks.append(self.text_block(money_lines, align="left", scale=1, force_reset_style=True))
+
+        blocks.append(self.rule_block())
+        blocks.append(self.center_block(footer_lines, scale=1, force_reset_style=True))
+
+        return Receipt(
+            name="default",
+            description="标准测试票：标题、票据信息、表头、商品明细、合计和尾部都做了分区排版",
+            blocks=blocks,
+        )
+
+    def _build_compact_receipt(self, data: ReceiptFormData) -> Receipt:
+        meta_lines: List[str] = []
+        if data.date:
+            meta_lines.append(data.date)
+        if data.receipt_no:
+            meta_lines.append(f"NO {data.receipt_no}")
+
+        blocks: List[ReceiptBlock] = [
+            self.title_block(data.title or "TITLE", scale=2, force_reset_style=True),
+        ]
+        if meta_lines:
+            blocks.append(self.center_block(meta_lines, scale=1))
+        if data.total:
+            blocks.append(self.rule_block())
+            blocks.append(self.center_block([f"TOTAL {data.total}"], scale=2, force_reset_style=True))
+        if data.footer:
+            blocks.append(self.rule_block())
+            blocks.append(self.center_block(self._split_nonempty_lines(data.footer), scale=1, force_reset_style=True))
 
         return Receipt(
             name="compact",
-            description="更短的联调模板，适合快速验证 block 边界与样式切换",
+            description="紧凑模板：适合快速看标题/总价/结束语的样式区分",
             blocks=blocks,
         )
 
@@ -295,15 +372,15 @@ class ReceiptBuilder:
         footer_lines = self._split_nonempty_lines(data.footer) or ["YINJIAN"]
         return Receipt(
             name="simple_center",
-            description="最小模板，用于快速验证居中/放大/打印触发，可从 GUI 自定义标题和文案",
+            description="最小模板：只验证标题、正文和尾部三段的样式区分",
             blocks=[
                 self.title_block(data.title or "HELLO", scale=2, force_reset_style=True),
-                self.center_block(center_lines, force_reset_style=False),
-                self.center_block(footer_lines, force_reset_style=False),
+                self.center_block(center_lines, scale=1, force_reset_style=True),
+                self.rule_block(),
+                self.center_block(footer_lines, scale=1, force_reset_style=True),
             ],
         )
 
-    # ===== Block 工厂 =====
     def title_block(
         self,
         text: str,
@@ -323,26 +400,8 @@ class ReceiptBuilder:
             force_reset_style=force_reset_style,
         )
 
-    def total_block(
-        self,
-        text: str,
-        *,
-        scale: int = 2,
-        force_reset_style: bool = False,
-    ) -> ReceiptBlock:
-        return ReceiptBlock(
-            text_lines=[text],
-            align="right",
-            scale=scale,
-            line_spacing=0,
-            margin_left=0,
-            margin_right=0,
-            trigger_print=True,
-            force_reset_style=force_reset_style,
-        )
-
     def rule_block(self) -> ReceiptBlock:
-        return self.text_block([self._HR], align="left", scale=1)
+        return self.text_block([self._HR], align="left", scale=1, force_reset_style=True)
 
     def center_block(
         self,
@@ -383,7 +442,6 @@ class ReceiptBuilder:
             force_reset_style=force_reset_style,
         )
 
-    # ===== 编码层 =====
     def _normalize_style(self, block: ReceiptBlock) -> BlockStyle:
         return BlockStyle(
             align=block.align,

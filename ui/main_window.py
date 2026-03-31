@@ -51,6 +51,7 @@ class MainWindow(tk.Tk):
         self.left_margin_var = tk.StringVar(value="0")
         self.right_margin_var = tk.StringVar(value="0")
         self.scale_var = tk.StringVar(value="1")
+        # 保留该变量，避免 controller 兼容性问题；UI 中不再显示
         self.preview_info_var = tk.StringVar(value="尚未收到打印帧")
         self.auto_crop_var = tk.BooleanVar(value=False)
         self.zoom_var = tk.IntVar(value=4)
@@ -96,9 +97,8 @@ class MainWindow(tk.Tk):
         right = ttk.Frame(self, padding=10)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=3)
-        right.rowconfigure(2, weight=4)
-        right.rowconfigure(3, weight=2)
+        right.rowconfigure(1, weight=4)
+        right.rowconfigure(2, weight=2)
 
         serial_frame = ttk.LabelFrame(self.left_inner, text="串口连接", padding=10)
         serial_frame.pack(fill="x", pady=(0, 10))
@@ -208,25 +208,21 @@ class MainWindow(tk.Tk):
 
         info_frame = ttk.Frame(right)
         info_frame.grid(row=0, column=0, sticky="ew")
-        info_frame.columnconfigure(1, weight=1)
-        ttk.Label(info_frame, text="当前打印段预览").grid(row=0, column=0, sticky="w")
-        ttk.Label(info_frame, textvariable=self.preview_info_var, foreground="#006600").grid(row=0, column=1, sticky="w", padx=(10, 0))
-        ttk.Checkbutton(info_frame, text="SETTINGS 自动裁边（会隐藏对齐效果，仅调试时使用）", variable=self.auto_crop_var, command=self._safe_call(lambda: self.on_preview_option_changed)).grid(row=0, column=2, padx=(10, 0))
-        ttk.Label(info_frame, text="缩放").grid(row=0, column=3, padx=(20, 2))
+        info_frame.columnconfigure(0, weight=1)
+        ttk.Checkbutton(
+            info_frame,
+            text="SETTINGS 自动裁边（会隐藏对齐效果，仅调试时使用）",
+            variable=self.auto_crop_var,
+            command=self._safe_call(lambda: self.on_preview_option_changed)
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(info_frame, text="缩放").grid(row=0, column=1, padx=(20, 2))
         zoom_spin = ttk.Spinbox(info_frame, from_=1, to=20, textvariable=self.zoom_var, width=6, command=self._safe_call(lambda: self.on_preview_option_changed))
-        zoom_spin.grid(row=0, column=4)
-        ttk.Button(info_frame, text="开始新小票", command=self._safe_call(lambda: self.on_start_new_receipt)).grid(row=0, column=5, padx=(16, 4))
-        ttk.Button(info_frame, text="清空历史预览", command=self._safe_call(lambda: self.on_clear_history_frames)).grid(row=0, column=6, padx=(4, 0))
-
-        preview_frame = ttk.LabelFrame(right, text="当前打印段预览", padding=8)
-        preview_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 8))
-        preview_frame.rowconfigure(0, weight=1)
-        preview_frame.columnconfigure(0, weight=1)
-        self.preview_canvas = tk.Canvas(preview_frame, bg="white")
-        self.preview_canvas.grid(row=0, column=0, sticky="nsew")
+        zoom_spin.grid(row=0, column=2)
+        ttk.Button(info_frame, text="开始新小票", command=self._safe_call(lambda: self.on_start_new_receipt)).grid(row=0, column=3, padx=(16, 4))
+        ttk.Button(info_frame, text="清空历史预览", command=self._safe_call(lambda: self.on_clear_history_frames)).grid(row=0, column=4, padx=(4, 0))
 
         history_frame = ttk.LabelFrame(right, text="小票历史累计预览", padding=8)
-        history_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
+        history_frame.grid(row=1, column=0, sticky="nsew", pady=(8, 8))
         history_frame.rowconfigure(0, weight=1)
         history_frame.columnconfigure(0, weight=1)
         self.history_canvas = tk.Canvas(history_frame, bg="#fafafa", highlightthickness=1, highlightbackground="#d0d0d0")
@@ -237,7 +233,7 @@ class MainWindow(tk.Tk):
         self._bind_text_mousewheel(self.history_canvas)
 
         raw_frame = ttk.LabelFrame(right, text="UART2 原始文本", padding=8)
-        raw_frame.grid(row=3, column=0, sticky="nsew")
+        raw_frame.grid(row=2, column=0, sticky="nsew")
         raw_frame.rowconfigure(0, weight=1)
         raw_frame.columnconfigure(0, weight=1)
         self.raw_uart2_text = ScrolledText(raw_frame, width=90, height=10, font=("Consolas", 9))

@@ -369,19 +369,27 @@ class PrinterHostController:
         self.state.preview.zoom = self.window.get_zoom()
 
         if self.state.preview.current_frame:
-            width, height, display_width, display_height = FrameRenderer.render_current_frame(
-                self.window.preview_canvas,
-                self.state.preview.current_frame,
-                self.state.preview.zoom,
-                self.state.preview.auto_crop,
-            )
+            if hasattr(self.window, "preview_canvas"):
+                width, height, display_width, display_height = FrameRenderer.render_current_frame(
+                    self.window.preview_canvas,
+                    self.state.preview.current_frame,
+                    self.state.preview.zoom,
+                    self.state.preview.auto_crop,
+                )
+            else:
+                frame = self.state.preview.current_frame
+                width, height = frame['WIDTH'], frame['HEIGHT']
+                display_width, display_height = width, height
             frame = self.state.preview.current_frame
-            self.window.preview_info_var.set(
-                f"TYPE={frame['TYPE']} | MODE={frame['MODE']} | 原始 {width}x{height} | 显示 {display_width}x{display_height}"
-            )
+            if hasattr(self.window, "preview_info_var"):
+                self.window.preview_info_var.set(
+                    f"TYPE={frame['TYPE']} | MODE={frame['MODE']} | 原始 {width}x{height} | 显示 {display_width}x{display_height}"
+                )
         else:
-            self.window.preview_canvas.delete("all")
-            self.window.preview_info_var.set("尚未收到打印帧")
+            if hasattr(self.window, "preview_canvas"):
+                self.window.preview_canvas.delete("all")
+            if hasattr(self.window, "preview_info_var"):
+                self.window.preview_info_var.set("尚未收到打印帧")
 
         FrameRenderer.render_history_frames(
             self.window.history_canvas,
@@ -398,8 +406,10 @@ class PrinterHostController:
     def clear_history_frames(self):
         self.state.preview.current_frame = None
         self.state.preview.clear_sessions()
-        self.window.preview_canvas.delete("all")
-        self.window.preview_info_var.set("尚未收到打印帧")
+        if hasattr(self.window, "preview_canvas"):
+            self.window.preview_canvas.delete("all")
+        if hasattr(self.window, "preview_info_var"):
+            self.window.preview_info_var.set("尚未收到打印帧")
         self.window.clear_history_preview()
 
     def _on_close(self):
