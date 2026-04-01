@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import time
 import uuid
 from typing import Optional
 from tkinter import messagebox
@@ -8,7 +9,7 @@ from tkinter import messagebox
 from app.app_state import AppState
 from protocol.command_builder import CommandBuilder, SendStep
 from protocol.uart2_frame_parser import UART2FrameParser
-from receipt.receipt_builder import ReceiptBuilder, SendPlan
+from receipt.receipt_builder import ReceiptBuilder, SendPlan, Receipt
 from app.receipt_prefs_store import ReceiptPrefsStore
 from render.frame_renderer import FrameRenderer
 from serial_comm.port_service import PortService
@@ -21,16 +22,65 @@ class PrinterHostController:
 
     当前这一版重点：
     1. 支持测试小票模板选择
-    2. 支持 GUI 参数化测试票内容
-    3. 使用按 step 节奏执行的发送策略，降低 MCU 接收压力
-    4. 适配 PreviewState 的 session 模型
+    2. 支持发送策略选择：
+       - block_step_stable
+       - block_fewer_triggers_style
+       - single_shot_plain
+    3. 普通模式下使用模板推荐策略
+    4. 推荐策略现在按实际 receipt 内容动态判定
+    5. 高级模式下允许手动覆盖策略
+    6. 支持更稳健的按 step 节奏执行发送
+    7. 在 trigger(0A 00 / 0C 00) 后，优先等待 UART2 返回打印帧再继续
+    8. 对不同发送策略应用不同的节拍与等待参数
+    9. 适配 PreviewState 的 session 模型
     """
 
-    NORMAL_STEP_DELAY_MS = 80
-    RESET_STEP_DELAY_MS = 180
-    SINGLELINE_TEXT_STEP_DELAY_MS = 150
-    MULTILINE_TEXT_STEP_DELAY_MS = 260
-    TRIGGER_STEP_DELAY_MS = 380
+    NORMAL_STEP_DELAY_MS = 90
+    RESET_STEP_DELAY_MS = 220
+
+    TEXT_BASE_DELAY_MS = 120
+    TEXT_PER_BYTE_DELAY_MS = 3
+    TEXT_NEWLINE_EXTRA_DELAY_MS = 120
+
+    # 各策略的发送节拍参数
+    STRATEGY_TEXT_DELAY_MULTIPLIER = {
+        ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE: 1.00,
+        ReceiptBuilder.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE: 1.20,
+        ReceiptBuilder.STRATEGY_SINGLE_SHOT_PLAIN: 1.45,
+    }
+
+    STRATEGY_TEXT_MAX_DELAY_MS = {
+        ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE: 900,
+        ReceiptBuilder.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE: 1300,
+        ReceiptBuilder.STRATEGY_SINGLE_SHOT_PLAIN: 2200,
+    }
+
+    # 大文本后紧跟 trigger 时，额外保护等待
+    STRATEGY_PRE_TRIGGER_GUARD_MS = {
+        ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE: 0,
+        ReceiptBuilder.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE: 160,
+        ReceiptBuilder.STRATEGY_SINGLE_SHOT_PLAIN: 380,
+    }
+
+    STRATEGY_TRIGGER_FALLBACK_DELAY_MS = {
+        ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE: 650,
+        ReceiptBuilder.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE: 900,
+        ReceiptBuilder.STRATEGY_SINGLE_SHOT_PLAIN: 1400,
+    }
+
+    STRATEGY_TRIGGER_WAIT_TIMEOUT_MS = {
+        ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE: 1800,
+        ReceiptBuilder.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE: 2600,
+        ReceiptBuilder.STRATEGY_SINGLE_SHOT_PLAIN: 4200,
+    }
+
+    STRATEGY_POST_TRIGGER_SETTLE_MS = {
+        ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE: 80,
+        ReceiptBuilder.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE: 140,
+        ReceiptBuilder.STRATEGY_SINGLE_SHOT_PLAIN: 260,
+    }
+
+    TRIGGER_POLL_INTERVAL_MS = 40
 
     def __init__(self):
         self.window = MainWindow()
@@ -42,17 +92,30 @@ class PrinterHostController:
         self.receipt_prefs_store = ReceiptPrefsStore()
 
         self._current_send_plan: Optional[SendPlan] = None
+        self._current_send_strategy_name: str = ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE
+        self._manual_strategy_choice: str = ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE
         self._receipt_send_after_id: Optional[str] = None
         self._receipt_send_active: bool = False
         self._receipt_forms_by_template: dict[str, dict[str, str]] = {}
         self._current_template_name: str = "default"
+
+        # trigger 等待状态
+        self._trigger_wait_after_id: Optional[str] = None
+        self._pending_trigger_next_idx: Optional[int] = None
+        self._pending_trigger_expected_frame_count: Optional[int] = None
+        self._pending_trigger_deadline_monotonic: float = 0.0
 
         self._bind_window_actions()
 
         self.state.preview.create_session(f"session_init_{uuid.uuid4().hex[:8]}")
         templates = self.receipt_builder.list_templates()
         self.window.set_receipt_templates(templates, default_template="default")
+        self.window.set_send_strategies(
+            self.receipt_builder.list_send_strategies(),
+            default_strategy=ReceiptBuilder.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE,
+        )
         self._restore_receipt_ui_state(templates)
+        self._refresh_strategy_mode_ui(write_log=False)
 
         self.refresh_ports()
         self.window.after(50, self._process_gui_queue)
@@ -79,6 +142,8 @@ class PrinterHostController:
         self.window.on_send_scale = self.send_scale
         self.window.on_send_test_receipt = self.send_test_receipt
         self.window.on_receipt_template_changed = self.on_receipt_template_changed
+        self.window.on_send_strategy_mode_changed = self.on_send_strategy_mode_changed
+        self.window.on_send_strategy_changed = self.on_send_strategy_changed
         self.window.on_start_new_receipt = self.start_new_receipt
         self.window.on_clear_history_frames = self.clear_history_frames
         self.window.on_preview_option_changed = self.rerender_views
@@ -107,6 +172,7 @@ class PrinterHostController:
                         self.window.append_log(
                             f"[UART2] 解析成功：{frame['TYPE']} {frame['WIDTH']}x{frame['HEIGHT']} MODE={frame['MODE']}\n"
                         )
+                        self._maybe_resume_after_uart2_frame()
 
                     elif result.is_error():
                         self.window.append_log(f"[UART2 ERROR] {result.error_msg}\n")
@@ -178,7 +244,7 @@ class PrinterHostController:
         except Exception as e:
             messagebox.showerror("UART2 连接失败", str(e))
 
-    # ===== 模板 =====
+    # ===== 模板与策略 =====
     def _apply_template_defaults(self, template_name: str):
         defaults = self.receipt_builder.get_template_form_defaults(template_name)
         self.window.set_receipt_form_defaults(defaults)
@@ -199,7 +265,6 @@ class PrinterHostController:
         forms_by_template = saved.get("forms_by_template", {})
         if not isinstance(forms_by_template, dict):
             forms_by_template = {}
-        # 仅保留有效模板项且表单必须是字典
         self._receipt_forms_by_template = {
             key: value for key, value in forms_by_template.items()
             if key in templates and isinstance(value, dict)
@@ -218,6 +283,37 @@ class PrinterHostController:
         else:
             self._apply_template_defaults(selected_template)
 
+    def _build_receipt_from_current_ui(self) -> Receipt:
+        template_name = self.window.get_receipt_template() or "default"
+        form_data = self.window.get_receipt_form_data()
+        return self.receipt_builder.build_receipt(template_name, form_data)
+
+    def _compute_recommended_strategy_from_ui(self) -> str:
+        template_name = self.window.get_receipt_template() or "default"
+        try:
+            receipt = self._build_receipt_from_current_ui()
+            return self.receipt_builder.get_recommended_strategy(template_name, receipt)
+        except Exception:
+            return self.receipt_builder.get_recommended_strategy(template_name, None)
+
+    def _refresh_strategy_mode_ui(self, *, write_log: bool):
+        use_recommended = self.window.get_use_recommended_strategy()
+        self.window.set_send_strategy_enabled(not use_recommended)
+
+        if use_recommended:
+            recommended = self._compute_recommended_strategy_from_ui()
+            self.window.set_send_strategy(recommended)
+            if write_log:
+                self.window.append_log(
+                    f"[RECEIPT] 已启用动态推荐策略：template={self._current_template_name} -> {recommended}\n"
+                )
+        else:
+            self.window.set_send_strategy(self._manual_strategy_choice)
+            if write_log:
+                self.window.append_log(
+                    f"[RECEIPT] 已切换为高级模式：当前手动策略={self._manual_strategy_choice}\n"
+                )
+
     def on_receipt_template_changed(self):
         previous_template = self._current_template_name
         if previous_template:
@@ -233,10 +329,34 @@ class PrinterHostController:
             self._apply_template_defaults(template_name)
 
         self._persist_receipt_ui_state()
+        self._refresh_strategy_mode_ui(write_log=False)
         self.window.append_log(f"[RECEIPT] 已切换模板：{template_name}\n")
+
+    def on_send_strategy_mode_changed(self):
+        if self._receipt_send_active:
+            messagebox.showwarning("发送中", "测试小票发送过程中不能切换策略模式")
+            self.window.set_use_recommended_strategy(not self.window.get_use_recommended_strategy())
+            return
+
+        if self.window.get_use_recommended_strategy():
+            current_ui_strategy = self.window.get_send_strategy() or self._manual_strategy_choice
+            self._manual_strategy_choice = current_ui_strategy
+            self._refresh_strategy_mode_ui(write_log=True)
+            return
+
+        self._refresh_strategy_mode_ui(write_log=True)
+
+    def on_send_strategy_changed(self):
+        if self.window.get_use_recommended_strategy():
+            return
+        self._manual_strategy_choice = self.window.get_send_strategy() or ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE
 
     # ===== 发送 =====
     def send_step(self, step: SendStep):
+        if self._receipt_send_active:
+            messagebox.showwarning("发送中", "测试小票发送过程中，请勿手动插入单步命令")
+            return
+
         try:
             self.serial_manager.send_uart1(step.payload)
             self.window.append_log(f"[HOST SEND] {step.desc} -> {step.payload.hex(' ').upper()}\n")
@@ -294,29 +414,52 @@ class PrinterHostController:
             messagebox.showwarning("发送中", "已有测试小票发送任务正在执行")
             return
 
+        if not self.serial_manager.uart1_connected():
+            messagebox.showerror("发送失败", "UART1 未连接")
+            return
+
         try:
+            self._cancel_all_receipt_timers()
+
             template_name = self.window.get_receipt_template() or "default"
+            receipt = self._build_receipt_from_current_ui()
+
+            if self.window.get_use_recommended_strategy():
+                strategy_name = self.receipt_builder.get_recommended_strategy(template_name, receipt)
+                self.window.set_send_strategy(strategy_name)
+            else:
+                strategy_name = self.window.get_send_strategy() or ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE
+                self._manual_strategy_choice = strategy_name
+
             self._current_template_name = template_name
+            self._current_send_strategy_name = strategy_name
+
             form_data = self.window.get_receipt_form_data()
             self._receipt_forms_by_template[template_name] = form_data
             self._persist_receipt_ui_state()
-            receipt = self.receipt_builder.build_receipt(template_name, form_data)
-            plan = self.receipt_builder.encode_receipt(receipt)
+
+            plan = self.receipt_builder.encode_receipt(receipt, strategy_name=strategy_name)
             self._current_send_plan = plan
             self._receipt_send_active = True
 
             self.clear_history_frames()
             self.state.preview.create_session(f"session_{uuid.uuid4().hex[:8]}")
 
+            strategy_source = "recommended" if self.window.get_use_recommended_strategy() else "manual"
             self.window.append_log(
-                f"[RECEIPT] 开始发送测试小票 template={template_name} name={receipt.name} 共 {plan.total} 步\n"
+                f"[RECEIPT] 开始发送测试小票 template={template_name} strategy={strategy_name} mode={strategy_source} name={receipt.name} 共 {plan.total} 步\n"
             )
             if receipt.description:
                 self.window.append_log(f"[RECEIPT] 模板说明：{receipt.description}\n")
+            if not self.serial_manager.uart2_connected():
+                self.window.append_log("[RECEIPT] UART2 未连接：本轮按固定节拍发送，不等待打印帧\n")
+
             self._send_receipt_step(0)
         except Exception as e:
             self._receipt_send_active = False
             self._current_send_plan = None
+            self._current_send_strategy_name = ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE
+            self._cancel_all_receipt_timers()
             messagebox.showerror("发送测试小票失败", str(e))
 
     def _send_receipt_step(self, idx: int):
@@ -327,7 +470,9 @@ class PrinterHostController:
 
         if idx >= plan.total:
             self._receipt_send_active = False
-            self._receipt_send_after_id = None
+            self._current_send_plan = None
+            self._current_send_strategy_name = ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE
+            self._cancel_all_receipt_timers()
             self.window.append_log(
                 f"[RECEIPT] 发送完成：{plan.sent_count}/{plan.total} 成功\n"
             )
@@ -346,22 +491,190 @@ class PrinterHostController:
             self.window.append_log(
                 f"[RECEIPT ERROR {record.index + 1}/{plan.total}] {str(e)}\n"
             )
+            self._receipt_send_active = False
+            self._current_send_plan = None
+            self._current_send_strategy_name = ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE
+            self._cancel_all_receipt_timers()
+            return
 
-        next_delay = self._decide_next_step_delay(record.step)
-        self._receipt_send_after_id = self.window.after(next_delay, lambda: self._send_receipt_step(idx + 1))
+        next_idx = idx + 1
+        next_step = None
+        if next_idx < plan.total:
+            next_step = plan.steps[next_idx].step
+
+        if self._is_trigger_step(record.step):
+            if self.serial_manager.uart2_connected():
+                self._arm_trigger_wait(next_idx)
+                return
+
+            next_delay = self._decide_next_step_delay(
+                record.step,
+                next_step=next_step,
+                strategy_name=self._current_send_strategy_name,
+            )
+            self._receipt_send_after_id = self.window.after(
+                next_delay,
+                lambda: self._send_receipt_step(next_idx),
+            )
+            return
+
+        next_delay = self._decide_next_step_delay(
+            record.step,
+            next_step=next_step,
+            strategy_name=self._current_send_strategy_name,
+        )
+        self._receipt_send_after_id = self.window.after(
+            next_delay,
+            lambda: self._send_receipt_step(next_idx),
+        )
+
+    def _arm_trigger_wait(self, next_idx: int):
+        self._cancel_trigger_wait_timer()
+        self._pending_trigger_next_idx = next_idx
+        self._pending_trigger_expected_frame_count = self._get_total_preview_frame_count() + 1
+        timeout_ms = self._get_trigger_wait_timeout_ms(self._current_send_strategy_name)
+        self._pending_trigger_deadline_monotonic = (
+            time.monotonic() + timeout_ms / 1000.0
+        )
+        self._trigger_wait_after_id = self.window.after(
+            self.TRIGGER_POLL_INTERVAL_MS,
+            self._check_trigger_wait,
+        )
+
+    def _check_trigger_wait(self):
+        self._trigger_wait_after_id = None
+
+        if not self._receipt_send_active:
+            self._reset_trigger_wait_state()
+            return
+
+        expected = self._pending_trigger_expected_frame_count
+        if expected is None or self._pending_trigger_next_idx is None:
+            return
+
+        if self._get_total_preview_frame_count() >= expected:
+            self._finish_trigger_wait(observed_uart2_frame=True)
+            return
+
+        if time.monotonic() >= self._pending_trigger_deadline_monotonic:
+            self.window.append_log("[RECEIPT] 等待 UART2 打印帧超时，按兜底节拍继续\n")
+            self._finish_trigger_wait(observed_uart2_frame=False)
+            return
+
+        self._trigger_wait_after_id = self.window.after(
+            self.TRIGGER_POLL_INTERVAL_MS,
+            self._check_trigger_wait,
+        )
+
+    def _maybe_resume_after_uart2_frame(self):
+        if not self._receipt_send_active:
+            return
+
+        expected = self._pending_trigger_expected_frame_count
+        if expected is None or self._pending_trigger_next_idx is None:
+            return
+
+        if self._get_total_preview_frame_count() >= expected:
+            self._finish_trigger_wait(observed_uart2_frame=True)
+
+    def _finish_trigger_wait(self, observed_uart2_frame: bool):
+        next_idx = self._pending_trigger_next_idx
+        self._cancel_trigger_wait_timer()
+        self._reset_trigger_wait_state()
+
+        if next_idx is None or not self._receipt_send_active:
+            return
+
+        if observed_uart2_frame:
+            delay = self._get_post_trigger_settle_ms(self._current_send_strategy_name)
+        else:
+            delay = self._get_trigger_fallback_delay_ms(self._current_send_strategy_name)
+
+        self._receipt_send_after_id = self.window.after(
+            delay,
+            lambda: self._send_receipt_step(next_idx),
+        )
+
+    def _cancel_receipt_after_timer(self):
+        if self._receipt_send_after_id is not None:
+            try:
+                self.window.after_cancel(self._receipt_send_after_id)
+            except Exception:
+                pass
+            self._receipt_send_after_id = None
+
+    def _cancel_trigger_wait_timer(self):
+        if self._trigger_wait_after_id is not None:
+            try:
+                self.window.after_cancel(self._trigger_wait_after_id)
+            except Exception:
+                pass
+            self._trigger_wait_after_id = None
+
+    def _reset_trigger_wait_state(self):
+        self._pending_trigger_next_idx = None
+        self._pending_trigger_expected_frame_count = None
+        self._pending_trigger_deadline_monotonic = 0.0
+
+    def _cancel_all_receipt_timers(self):
+        self._cancel_receipt_after_timer()
+        self._cancel_trigger_wait_timer()
+        self._reset_trigger_wait_state()
+
+    def _get_total_preview_frame_count(self) -> int:
+        return len(self.state.preview.get_all_frames_in_order())
 
     @staticmethod
-    def _decide_next_step_delay(step: SendStep) -> int:
+    def _is_trigger_step(step: SendStep) -> bool:
+        return step.payload in (b"\x0A\x00", b"\x0C\x00")
+
+    @staticmethod
+    def _is_text_step(step: SendStep) -> bool:
+        return bool(step.payload) and step.payload[:1] != b"\x1B"
+
+    def _get_trigger_wait_timeout_ms(self, strategy_name: str) -> int:
+        return self.STRATEGY_TRIGGER_WAIT_TIMEOUT_MS.get(strategy_name, 1800)
+
+    def _get_trigger_fallback_delay_ms(self, strategy_name: str) -> int:
+        return self.STRATEGY_TRIGGER_FALLBACK_DELAY_MS.get(strategy_name, 650)
+
+    def _get_post_trigger_settle_ms(self, strategy_name: str) -> int:
+        return self.STRATEGY_POST_TRIGGER_SETTLE_MS.get(strategy_name, 80)
+
+    def _decide_next_step_delay(
+        self,
+        step: SendStep,
+        *,
+        next_step: Optional[SendStep],
+        strategy_name: str,
+    ) -> int:
         payload = step.payload
+
         if payload == b"\x1B\x40":
-            return PrinterHostController.RESET_STEP_DELAY_MS
+            return self.RESET_STEP_DELAY_MS
+
         if payload in (b"\x0A\x00", b"\x0C\x00"):
-            return PrinterHostController.TRIGGER_STEP_DELAY_MS
-        if payload and payload[:1] != b"\x1B":
-            if b"\n" in payload or b"\r" in payload:
-                return PrinterHostController.MULTILINE_TEXT_STEP_DELAY_MS
-            return PrinterHostController.SINGLELINE_TEXT_STEP_DELAY_MS
-        return PrinterHostController.NORMAL_STEP_DELAY_MS
+            return self._get_trigger_fallback_delay_ms(strategy_name)
+
+        if self._is_text_step(step):
+            newline_count = payload.count(b"\n") + payload.count(b"\r")
+            multiplier = self.STRATEGY_TEXT_DELAY_MULTIPLIER.get(strategy_name, 1.0)
+            max_delay = self.STRATEGY_TEXT_MAX_DELAY_MS.get(strategy_name, 900)
+
+            delay = int(
+                (
+                    self.TEXT_BASE_DELAY_MS
+                    + len(payload) * self.TEXT_PER_BYTE_DELAY_MS
+                    + newline_count * self.TEXT_NEWLINE_EXTRA_DELAY_MS
+                ) * multiplier
+            )
+
+            if next_step is not None and self._is_trigger_step(next_step):
+                delay += self.STRATEGY_PRE_TRIGGER_GUARD_MS.get(strategy_name, 0)
+
+            return min(delay, max_delay)
+
+        return self.NORMAL_STEP_DELAY_MS
 
     # ===== 预览 =====
     def rerender_views(self):
@@ -399,6 +712,10 @@ class PrinterHostController:
         )
 
     def start_new_receipt(self):
+        if self._receipt_send_active:
+            messagebox.showwarning("发送中", "测试小票发送过程中不能手动开始新小票")
+            return
+
         self.clear_history_frames()
         self.state.preview.create_session(f"session_{uuid.uuid4().hex[:8]}")
         self.window.append_log("[HOST] 开始新小票，已清空历史预览\n")
@@ -413,12 +730,7 @@ class PrinterHostController:
         self.window.clear_history_preview()
 
     def _on_close(self):
-        if self._receipt_send_after_id is not None:
-            try:
-                self.window.after_cancel(self._receipt_send_after_id)
-            except Exception:
-                pass
-            self._receipt_send_after_id = None
+        self._cancel_all_receipt_timers()
         self._receipt_send_active = False
         try:
             self._save_current_template_form()

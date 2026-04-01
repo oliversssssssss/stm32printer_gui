@@ -31,6 +31,8 @@ class MainWindow(tk.Tk):
         self.on_send_scale: Optional[Callable[[], None]] = None
         self.on_send_test_receipt: Optional[Callable[[], None]] = None
         self.on_receipt_template_changed: Optional[Callable[[], None]] = None
+        self.on_send_strategy_mode_changed: Optional[Callable[[], None]] = None
+        self.on_send_strategy_changed: Optional[Callable[[], None]] = None
         self.on_start_new_receipt: Optional[Callable[[], None]] = None
         self.on_clear_history_frames: Optional[Callable[[], None]] = None
         self.on_preview_option_changed: Optional[Callable[[], None]] = None
@@ -51,12 +53,14 @@ class MainWindow(tk.Tk):
         self.left_margin_var = tk.StringVar(value="0")
         self.right_margin_var = tk.StringVar(value="0")
         self.scale_var = tk.StringVar(value="1")
-        # 保留该变量，避免 controller 兼容性问题；UI 中不再显示
         self.preview_info_var = tk.StringVar(value="尚未收到打印帧")
         self.auto_crop_var = tk.BooleanVar(value=False)
         self.zoom_var = tk.IntVar(value=4)
 
         self.receipt_template_var = tk.StringVar(value="default")
+        self.send_strategy_var = tk.StringVar(value="block_fewer_triggers_style")
+        self.use_recommended_strategy_var = tk.BooleanVar(value=True)
+
         self.receipt_title_var = tk.StringVar(value="YINJIAN DRINKS")
         self.receipt_date_var = tk.StringVar(value="2026-03-20")
         self.receipt_no_var = tk.StringVar(value="1234567890")
@@ -144,17 +148,42 @@ class MainWindow(tk.Tk):
 
         receipt_frame = ttk.LabelFrame(self.left_inner, text="测试小票模板", padding=10)
         receipt_frame.pack(fill="x", pady=(0, 10))
+
         ttk.Label(receipt_frame, text="模板").grid(row=0, column=0, sticky="w")
         self.receipt_template_combo = ttk.Combobox(
             receipt_frame,
             textvariable=self.receipt_template_var,
             state="readonly",
-            width=24,
+            width=20,
         )
         self.receipt_template_combo.grid(row=0, column=1, padx=6, sticky="ew")
         self.receipt_template_combo.bind("<<ComboboxSelected>>", self._on_receipt_template_selected)
-        ttk.Button(receipt_frame, text="打印测试小票", command=self._safe_call(lambda: self.on_send_test_receipt)).grid(row=0, column=2, sticky="ew")
-        ttk.Label(receipt_frame, text="可选模板：default / compact / simple_center。下方参数会随模板切换自动回填。", foreground="#555555").grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        self.use_recommended_strategy_check = ttk.Checkbutton(
+            receipt_frame,
+            text="使用模板推荐策略（默认）",
+            variable=self.use_recommended_strategy_var,
+            command=self._safe_call(lambda: self.on_send_strategy_mode_changed),
+        )
+        self.use_recommended_strategy_check.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        ttk.Label(receipt_frame, text="高级手动策略").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.send_strategy_combo = ttk.Combobox(
+            receipt_frame,
+            textvariable=self.send_strategy_var,
+            state="readonly",
+            width=20,
+        )
+        self.send_strategy_combo.grid(row=2, column=1, padx=6, pady=(6, 0), sticky="ew")
+        self.send_strategy_combo.bind("<<ComboboxSelected>>", self._on_send_strategy_selected)
+
+        ttk.Button(receipt_frame, text="打印测试小票", command=self._safe_call(lambda: self.on_send_test_receipt)).grid(row=0, column=2, rowspan=3, sticky="nsew")
+
+        ttk.Label(
+            receipt_frame,
+            text="普通模式自动选策略；关闭推荐后可手动切换 stable / fewer_triggers / single_shot。",
+            foreground="#555555",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
         receipt_frame.columnconfigure(1, weight=1)
 
         receipt_param_frame = ttk.LabelFrame(self.left_inner, text="测试票参数", padding=10)
@@ -245,6 +274,10 @@ class MainWindow(tk.Tk):
         if self.on_receipt_template_changed:
             self.on_receipt_template_changed()
 
+    def _on_send_strategy_selected(self, _event=None):
+        if self.on_send_strategy_changed:
+            self.on_send_strategy_changed()
+
     def _safe_call(self, cb_getter: Callable[[], Optional[Callable[[], None]]]):
         def _wrapped():
             cb = cb_getter()
@@ -307,6 +340,24 @@ class MainWindow(tk.Tk):
             self.receipt_template_var.set(templates[0])
         else:
             self.receipt_template_var.set("")
+
+    def set_send_strategies(self, strategies: list[str], default_strategy: str = "block_step_stable"):
+        self.send_strategy_combo["values"] = strategies
+        if default_strategy in strategies:
+            self.send_strategy_var.set(default_strategy)
+        elif strategies:
+            self.send_strategy_var.set(strategies[0])
+        else:
+            self.send_strategy_var.set("")
+
+    def set_send_strategy(self, strategy_name: str):
+        self.send_strategy_var.set(strategy_name)
+
+    def set_send_strategy_enabled(self, enabled: bool):
+        self.send_strategy_combo.config(state="readonly" if enabled else "disabled")
+
+    def set_use_recommended_strategy(self, use_recommended: bool):
+        self.use_recommended_strategy_var.set(use_recommended)
 
     def set_receipt_template(self, template_name: str):
         self.receipt_template_var.set(template_name)
@@ -382,6 +433,12 @@ class MainWindow(tk.Tk):
 
     def get_receipt_template(self) -> str:
         return self.receipt_template_var.get().strip()
+
+    def get_send_strategy(self) -> str:
+        return self.send_strategy_var.get().strip()
+
+    def get_use_recommended_strategy(self) -> bool:
+        return bool(self.use_recommended_strategy_var.get())
 
     def get_receipt_form_data(self) -> dict[str, str]:
         return {
