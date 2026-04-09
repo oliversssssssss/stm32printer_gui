@@ -31,6 +31,7 @@ class MainWindow(tk.Tk):
         self.on_send_scale: Optional[Callable[[], None]] = None
         self.on_send_test_receipt: Optional[Callable[[], None]] = None
         self.on_receipt_template_changed: Optional[Callable[[], None]] = None
+        self.on_receipt_form_changed: Optional[Callable[[], None]] = None
         self.on_send_strategy_mode_changed: Optional[Callable[[], None]] = None
         self.on_send_strategy_changed: Optional[Callable[[], None]] = None
         self.on_start_new_receipt: Optional[Callable[[], None]] = None
@@ -39,6 +40,7 @@ class MainWindow(tk.Tk):
 
         self._build_vars()
         self._build_ui()
+        self._bind_receipt_form_watchers()
 
     def _build_vars(self):
         self.port1_var = tk.StringVar()
@@ -67,6 +69,12 @@ class MainWindow(tk.Tk):
         self.receipt_total_var = tk.StringVar(value="23.00")
         self.receipt_cash_var = tk.StringVar(value="50.00")
         self.receipt_change_var = tk.StringVar(value="27.00")
+
+        self.recommend_mode_var = tk.StringVar(value="推荐模式（自动）")
+        self.recommend_system_var = tk.StringVar(value="-")
+        self.recommend_effective_var = tk.StringVar(value="-")
+        self.recommend_summary_var = tk.StringVar(value="尚未生成推荐说明")
+        self.recommend_stats_var = tk.StringVar(value="-")
 
     def _build_ui(self):
         self.columnconfigure(0, weight=0)
@@ -186,6 +194,42 @@ class MainWindow(tk.Tk):
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
         receipt_frame.columnconfigure(1, weight=1)
 
+        recommend_frame = ttk.LabelFrame(self.left_inner, text="策略推荐说明", padding=10)
+        recommend_frame.pack(fill="x", pady=(0, 10))
+        recommend_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(recommend_frame, text="当前模式").grid(row=0, column=0, sticky="nw")
+        ttk.Label(recommend_frame, textvariable=self.recommend_mode_var, foreground="#0066cc").grid(row=0, column=1, sticky="w")
+
+        ttk.Label(recommend_frame, text="系统推荐").grid(row=1, column=0, sticky="nw", pady=(4, 0))
+        ttk.Label(recommend_frame, textvariable=self.recommend_system_var).grid(row=1, column=1, sticky="w", pady=(4, 0))
+
+        ttk.Label(recommend_frame, text="当前生效").grid(row=2, column=0, sticky="nw", pady=(4, 0))
+        ttk.Label(recommend_frame, textvariable=self.recommend_effective_var).grid(row=2, column=1, sticky="w", pady=(4, 0))
+
+        ttk.Label(recommend_frame, text="摘要").grid(row=3, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(
+            recommend_frame,
+            textvariable=self.recommend_summary_var,
+            wraplength=430,
+            justify="left",
+            foreground="#333333",
+        ).grid(row=3, column=1, sticky="w", pady=(6, 0))
+
+        ttk.Label(recommend_frame, text="依据").grid(row=4, column=0, sticky="nw", pady=(6, 0))
+        self.recommend_reasons_text = ScrolledText(recommend_frame, height=5, width=52, font=("Consolas", 9))
+        self.recommend_reasons_text.grid(row=4, column=1, sticky="ew", pady=(6, 0))
+        self.recommend_reasons_text.configure(state="disabled")
+
+        ttk.Label(recommend_frame, text="统计").grid(row=5, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(
+            recommend_frame,
+            textvariable=self.recommend_stats_var,
+            wraplength=430,
+            justify="left",
+            foreground="#666666",
+        ).grid(row=5, column=1, sticky="w", pady=(6, 0))
+
         receipt_param_frame = ttk.LabelFrame(self.left_inner, text="测试票参数", padding=10)
         receipt_param_frame.pack(fill="x", pady=(0, 10))
         ttk.Label(receipt_param_frame, text="标题").grid(row=0, column=0, sticky="w")
@@ -270,6 +314,32 @@ class MainWindow(tk.Tk):
         self.raw_uart2_text.configure(state="disabled")
         self._bind_text_mousewheel(self.raw_uart2_text)
 
+    def _bind_receipt_form_watchers(self):
+        watched_vars = [
+            self.receipt_title_var,
+            self.receipt_date_var,
+            self.receipt_no_var,
+            self.receipt_total_var,
+            self.receipt_cash_var,
+            self.receipt_change_var,
+        ]
+
+        for var in watched_vars:
+            var.trace_add("write", lambda *_: self._notify_receipt_form_changed())
+
+        self.receipt_items_text.bind("<<Modified>>", self._on_multiline_text_modified)
+        self.receipt_footer_text.bind("<<Modified>>", self._on_multiline_text_modified)
+
+    def _on_multiline_text_modified(self, event):
+        widget = event.widget
+        if widget.edit_modified():
+            widget.edit_modified(False)
+            self._notify_receipt_form_changed()
+
+    def _notify_receipt_form_changed(self):
+        if self.on_receipt_form_changed:
+            self.on_receipt_form_changed()
+
     def _on_receipt_template_selected(self, _event=None):
         if self.on_receipt_template_changed:
             self.on_receipt_template_changed()
@@ -289,12 +359,15 @@ class MainWindow(tk.Tk):
         def _on_mousewheel(event):
             widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
             return "break"
+
         def _on_linux_up(event):
             widget.yview_scroll(-1, "units")
             return "break"
+
         def _on_linux_down(event):
             widget.yview_scroll(1, "units")
             return "break"
+
         widget.bind("<MouseWheel>", _on_mousewheel)
         widget.bind("<Button-4>", _on_linux_up)
         widget.bind("<Button-5>", _on_linux_down)
@@ -303,20 +376,25 @@ class MainWindow(tk.Tk):
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
             return "break"
+
         def _on_linux_up(event):
             canvas.yview_scroll(-1, "units")
             return "break"
+
         def _on_linux_down(event):
             canvas.yview_scroll(1, "units")
             return "break"
+
         def _bind_all_handlers(_event=None):
             canvas.bind_all("<MouseWheel>", _on_mousewheel)
             canvas.bind_all("<Button-4>", _on_linux_up)
             canvas.bind_all("<Button-5>", _on_linux_down)
+
         def _unbind_all_handlers(_event=None):
             canvas.unbind_all("<MouseWheel>")
             canvas.unbind_all("<Button-4>")
             canvas.unbind_all("<Button-5>")
+
         canvas.bind("<Enter>", _bind_all_handlers)
         inner_widget.bind("<Enter>", _bind_all_handlers)
         canvas.bind("<Leave>", _unbind_all_handlers)
@@ -369,10 +447,36 @@ class MainWindow(tk.Tk):
         self.receipt_total_var.set(data.get("total", ""))
         self.receipt_cash_var.set(data.get("cash", ""))
         self.receipt_change_var.set(data.get("change", ""))
+
         self.receipt_items_text.delete("1.0", "end")
         self.receipt_items_text.insert("1.0", data.get("items_text", ""))
+        self.receipt_items_text.edit_modified(False)
+
         self.receipt_footer_text.delete("1.0", "end")
         self.receipt_footer_text.insert("1.0", data.get("footer", ""))
+        self.receipt_footer_text.edit_modified(False)
+
+    def set_strategy_recommendation_info(
+        self,
+        *,
+        mode_text: str,
+        recommended_strategy: str,
+        effective_strategy: str,
+        summary: str,
+        reasons: list[str],
+        stats_text: str,
+    ):
+        self.recommend_mode_var.set(mode_text)
+        self.recommend_system_var.set(recommended_strategy)
+        self.recommend_effective_var.set(effective_strategy)
+        self.recommend_summary_var.set(summary)
+        self.recommend_stats_var.set(stats_text)
+
+        content = "\n".join(f"- {item}" for item in reasons) if reasons else "-"
+        self.recommend_reasons_text.configure(state="normal")
+        self.recommend_reasons_text.delete("1.0", "end")
+        self.recommend_reasons_text.insert("1.0", content)
+        self.recommend_reasons_text.configure(state="disabled")
 
     def set_status(self, text: str):
         self.status_var.set(text)

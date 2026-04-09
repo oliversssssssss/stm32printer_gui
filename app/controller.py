@@ -27,12 +27,15 @@ class PrinterHostController:
        - block_fewer_triggers_style
        - single_shot_plain
     3. 普通模式下使用模板推荐策略
-    4. 推荐策略现在按实际 receipt 内容动态判定
+    4. 推荐策略按实际 receipt 内容动态判定
     5. 高级模式下允许手动覆盖策略
-    6. 支持更稳健的按 step 节奏执行发送
-    7. 在 trigger(0A 00 / 0C 00) 后，优先等待 UART2 返回打印帧再继续
-    8. 对不同发送策略应用不同的节拍与等待参数
-    9. 适配 PreviewState 的 session 模型
+    6. UI 中展示“为什么推荐这个策略”
+    7. 表单变化时自动刷新推荐说明
+    8. 策略模式与手动策略选择可持久化
+    9. 支持更稳健的按 step 节奏执行发送
+    10. 在 trigger(0A 00 / 0C 00) 后，优先等待 UART2 返回打印帧再继续
+    11. 对不同发送策略应用不同的节拍与等待参数
+    12. 适配 PreviewState 的 session 模型
     """
 
     NORMAL_STEP_DELAY_MS = 90
@@ -116,6 +119,7 @@ class PrinterHostController:
         )
         self._restore_receipt_ui_state(templates)
         self._refresh_strategy_mode_ui(write_log=False)
+        self._update_recommendation_panel()
 
         self.refresh_ports()
         self.window.after(50, self._process_gui_queue)
@@ -142,6 +146,7 @@ class PrinterHostController:
         self.window.on_send_scale = self.send_scale
         self.window.on_send_test_receipt = self.send_test_receipt
         self.window.on_receipt_template_changed = self.on_receipt_template_changed
+        self.window.on_receipt_form_changed = self.on_receipt_form_changed
         self.window.on_send_strategy_mode_changed = self.on_send_strategy_mode_changed
         self.window.on_send_strategy_changed = self.on_send_strategy_changed
         self.window.on_start_new_receipt = self.start_new_receipt
@@ -257,6 +262,8 @@ class PrinterHostController:
         self.receipt_prefs_store.save(
             selected_template=self._current_template_name or (self.window.get_receipt_template() or "default"),
             forms_by_template=self._receipt_forms_by_template,
+            use_recommended_strategy=self.window.get_use_recommended_strategy(),
+            manual_strategy_choice=self._manual_strategy_choice,
         )
 
     def _restore_receipt_ui_state(self, templates: list[str]):
@@ -283,29 +290,84 @@ class PrinterHostController:
         else:
             self._apply_template_defaults(selected_template)
 
+        saved_use_recommended = saved.get("use_recommended_strategy")
+        if isinstance(saved_use_recommended, bool):
+            self.window.set_use_recommended_strategy(saved_use_recommended)
+        else:
+            self.window.set_use_recommended_strategy(True)
+
+        saved_manual_strategy = saved.get("manual_strategy_choice")
+        allowed = set(self.receipt_builder.list_send_strategies())
+        if isinstance(saved_manual_strategy, str) and saved_manual_strategy in allowed:
+            self._manual_strategy_choice = saved_manual_strategy
+        else:
+            self._manual_strategy_choice = ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE
+
     def _build_receipt_from_current_ui(self) -> Receipt:
         template_name = self.window.get_receipt_template() or "default"
         form_data = self.window.get_receipt_form_data()
         return self.receipt_builder.build_receipt(template_name, form_data)
 
-    def _compute_recommended_strategy_from_ui(self) -> str:
+    def _compute_recommendation_from_ui(self):
         template_name = self.window.get_receipt_template() or "default"
         try:
             receipt = self._build_receipt_from_current_ui()
-            return self.receipt_builder.get_recommended_strategy(template_name, receipt)
+            return self.receipt_builder.explain_recommended_strategy(template_name, receipt)
         except Exception:
-            return self.receipt_builder.get_recommended_strategy(template_name, None)
+            return self.receipt_builder.explain_recommended_strategy(template_name, None)
+
+    def _format_recommendation_stats(self, stats) -> str:
+        return (
+            f"blocks={stats.total_blocks} | "
+            f"nonempty_lines={stats.total_nonempty_lines} | "
+            f"chars={stats.total_chars} | "
+            f"max_block_chars={stats.max_block_chars} | "
+            f"style_transitions={stats.style_transitions} | "
+            f"emphasis_blocks={stats.emphasis_block_count} | "
+            f"money_blocks={stats.money_block_count} | "
+            f"multiline_blocks={stats.multiline_block_count}"
+        )
+
+    def _update_recommendation_panel(self):
+        rec = self._compute_recommendation_from_ui()
+        use_recommended = self.window.get_use_recommended_strategy()
+        current_selected = self.window.get_send_strategy() or self._manual_strategy_choice
+
+        if use_recommended:
+            mode_text = "推荐模式（自动）"
+            effective_strategy = rec.strategy
+            summary = rec.summary
+            reasons = rec.reasons
+            self.window.set_send_strategy(rec.strategy)
+        else:
+            mode_text = "高级模式（手动）"
+            effective_strategy = current_selected
+            if effective_strategy == rec.strategy:
+                summary = f"当前手动策略与系统推荐一致：{rec.strategy}"
+            else:
+                summary = f"系统推荐：{rec.strategy}；当前手动覆盖为：{effective_strategy}"
+            reasons = ["你当前处于高级手动模式。"] + rec.reasons
+
+        stats_text = self._format_recommendation_stats(rec.stats)
+        self.window.set_strategy_recommendation_info(
+            mode_text=mode_text,
+            recommended_strategy=rec.strategy,
+            effective_strategy=effective_strategy,
+            summary=summary,
+            reasons=reasons,
+            stats_text=stats_text,
+        )
 
     def _refresh_strategy_mode_ui(self, *, write_log: bool):
         use_recommended = self.window.get_use_recommended_strategy()
         self.window.set_send_strategy_enabled(not use_recommended)
 
         if use_recommended:
-            recommended = self._compute_recommended_strategy_from_ui()
-            self.window.set_send_strategy(recommended)
+            rec = self._compute_recommendation_from_ui()
+            self.window.set_send_strategy(rec.strategy)
             if write_log:
                 self.window.append_log(
-                    f"[RECEIPT] 已启用动态推荐策略：template={self._current_template_name} -> {recommended}\n"
+                    f"[RECEIPT] 已启用动态推荐策略：template={self._current_template_name} -> {rec.strategy}\n"
                 )
         else:
             self.window.set_send_strategy(self._manual_strategy_choice)
@@ -313,6 +375,8 @@ class PrinterHostController:
                 self.window.append_log(
                     f"[RECEIPT] 已切换为高级模式：当前手动策略={self._manual_strategy_choice}\n"
                 )
+
+        self._update_recommendation_panel()
 
     def on_receipt_template_changed(self):
         previous_template = self._current_template_name
@@ -332,6 +396,11 @@ class PrinterHostController:
         self._refresh_strategy_mode_ui(write_log=False)
         self.window.append_log(f"[RECEIPT] 已切换模板：{template_name}\n")
 
+    def on_receipt_form_changed(self):
+        if self._receipt_send_active:
+            return
+        self._update_recommendation_panel()
+
     def on_send_strategy_mode_changed(self):
         if self._receipt_send_active:
             messagebox.showwarning("发送中", "测试小票发送过程中不能切换策略模式")
@@ -341,15 +410,19 @@ class PrinterHostController:
         if self.window.get_use_recommended_strategy():
             current_ui_strategy = self.window.get_send_strategy() or self._manual_strategy_choice
             self._manual_strategy_choice = current_ui_strategy
+            self._persist_receipt_ui_state()
             self._refresh_strategy_mode_ui(write_log=True)
             return
 
+        self._persist_receipt_ui_state()
         self._refresh_strategy_mode_ui(write_log=True)
 
     def on_send_strategy_changed(self):
         if self.window.get_use_recommended_strategy():
             return
         self._manual_strategy_choice = self.window.get_send_strategy() or ReceiptBuilder.STRATEGY_BLOCK_STEP_STABLE
+        self._persist_receipt_ui_state()
+        self._update_recommendation_panel()
 
     # ===== 发送 =====
     def send_step(self, step: SendStep):

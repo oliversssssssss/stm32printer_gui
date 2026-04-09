@@ -115,6 +115,15 @@ class ReceiptStats:
     emphasis_block_count: int
     money_block_count: int
     multiline_block_count: int
+    centered_block_count: int
+
+
+@dataclass(frozen=True)
+class StrategyRecommendation:
+    strategy: str
+    summary: str
+    reasons: List[str]
+    stats: ReceiptStats
 
 
 class ReceiptBuilder:
@@ -130,15 +139,17 @@ class ReceiptBuilder:
     2. single_shot_plain
        - 将同一张 receipt 平铺成一个 plain-text 大块
        - 最后只发送一次 trigger
-       - 不保留真正的块内样式，仅保留“视觉上的”左右/居中排版
+       - 不保留真正的块内样式，仅保留视觉排版
 
     3. block_fewer_triggers_style
        - 保留 block 样式分组
-       - 将“相邻且样式相同”的 block 合并
+       - 将相邻且样式相同的 block 合并
        - 在尽量保留样式的前提下，减少 trigger 次数
 
-    当前这一轮新增：
-    - 推荐策略可按实际 receipt 内容动态判定，而不仅仅按模板名固定映射。
+    当前这一轮重点：
+    - 动态推荐规则继续微调
+    - 只要 receipt 明显依赖“标题居中 / TOTAL 强调 / footer 居中”等样式效果，
+      就优先推荐 block_fewer_triggers_style，而不是过早推荐 single_shot_plain。
     """
 
     STRATEGY_BLOCK_STEP_STABLE = "block_step_stable"
@@ -158,7 +169,6 @@ class ReceiptBuilder:
             "default": self._build_default_receipt,
             "compact": self._build_compact_receipt,
             "simple_center": self._build_simple_center_receipt,
-            # 兼容保留原实验模板
             "single_shot_plain": self._build_single_shot_plain_receipt,
         }
 
@@ -177,15 +187,36 @@ class ReceiptBuilder:
         template_name: str,
         receipt: Optional[Receipt] = None,
     ) -> str:
-        """推荐策略。
+        return self.explain_recommended_strategy(template_name, receipt).strategy
 
-        优先级：
-        1. 如果提供了 receipt，则按当前实际内容动态判定
-        2. 否则退回模板级默认推荐
-        """
-        if receipt is not None:
-            return self._recommend_strategy_from_receipt(template_name, receipt)
-        return self._get_template_default_strategy(template_name)
+    def explain_recommended_strategy(
+        self,
+        template_name: str,
+        receipt: Optional[Receipt] = None,
+    ) -> StrategyRecommendation:
+        if receipt is None:
+            strategy = self._get_template_default_strategy(template_name)
+            empty_stats = ReceiptStats(
+                total_blocks=0,
+                total_nonempty_lines=0,
+                total_chars=0,
+                max_block_chars=0,
+                style_transitions=0,
+                emphasis_block_count=0,
+                money_block_count=0,
+                multiline_block_count=0,
+                centered_block_count=0,
+            )
+            return StrategyRecommendation(
+                strategy=strategy,
+                summary=f"当前按模板默认推荐：{strategy}",
+                reasons=[
+                    f"模板 {template_name} 还未构造成完整 receipt，先使用模板级推荐。",
+                ],
+                stats=empty_stats,
+            )
+
+        return self._recommend_strategy_from_receipt(template_name, receipt)
 
     def build_test_receipt(self) -> Receipt:
         return self.build_receipt("default")
@@ -239,7 +270,6 @@ class ReceiptBuilder:
         return plan
 
     def _encode_receipt_single_shot_plain(self, receipt: Receipt) -> SendPlan:
-        """将任意 receipt 平铺为一个大文本块，最后只触发一次打印。"""
         plan = SendPlan()
 
         plain_lines = self._flatten_receipt_to_plain_lines(receipt)
@@ -258,7 +288,6 @@ class ReceiptBuilder:
         return plan
 
     def _encode_receipt_block_fewer_triggers_style(self, receipt: Receipt) -> SendPlan:
-        """保留样式分组，但合并相邻且样式相同的 block，减少 trigger 次数。"""
         merged_blocks = self._merge_adjacent_same_style_blocks(receipt.blocks)
 
         plan = SendPlan()
@@ -273,65 +302,101 @@ class ReceiptBuilder:
         return plan
 
     def _get_template_default_strategy(self, template_name: str) -> str:
-        """模板级兜底推荐。"""
+        # 这里开始更偏向“保住样式”
         if template_name == "default":
             return self.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE
         if template_name == "compact":
-            return self.STRATEGY_SINGLE_SHOT_PLAIN
+            return self.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE
         if template_name == "simple_center":
-            return self.STRATEGY_SINGLE_SHOT_PLAIN
+            return self.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE
         if template_name == "single_shot_plain":
             return self.STRATEGY_SINGLE_SHOT_PLAIN
         return self.STRATEGY_BLOCK_STEP_STABLE
 
-    def _recommend_strategy_from_receipt(self, template_name: str, receipt: Receipt) -> str:
-        """按当前实际 receipt 内容动态推荐策略。"""
-        # 很小的居中欢迎类模板，直接 single-shot plain
-        if template_name == "simple_center":
-            return self.STRATEGY_SINGLE_SHOT_PLAIN
-
+    def _recommend_strategy_from_receipt(self, template_name: str, receipt: Receipt) -> StrategyRecommendation:
         stats = self._analyze_receipt(receipt)
+        reasons: List[str] = []
 
-        # 特别长、特别多行、或者存在超长大块文本时，稳定优先
+        if template_name == "single_shot_plain":
+            reasons.append("当前模板本身就是 plain-text single-shot 实验模板。")
+            reasons.append("继续保持 single_shot_plain 最符合模板语义。")
+            return StrategyRecommendation(
+                strategy=self.STRATEGY_SINGLE_SHOT_PLAIN,
+                summary="该模板本身就是 single-shot plain 模板。",
+                reasons=reasons,
+                stats=stats,
+            )
+
+        # 超重内容：稳定优先
         if (
             stats.total_chars >= 320
             or stats.total_nonempty_lines >= 20
             or stats.max_block_chars >= 220
         ):
-            return self.STRATEGY_BLOCK_STEP_STABLE
+            if stats.total_chars >= 320:
+                reasons.append(f"总字符数较多（{stats.total_chars}）。")
+            if stats.total_nonempty_lines >= 20:
+                reasons.append(f"非空行数较多（{stats.total_nonempty_lines}）。")
+            if stats.max_block_chars >= 220:
+                reasons.append(f"存在较大的单块文本（最长 {stats.max_block_chars} 字符）。")
+            reasons.append("优先选择最稳的 block_step_stable。")
+            return StrategyRecommendation(
+                strategy=self.STRATEGY_BLOCK_STEP_STABLE,
+                summary="当前内容偏重，优先稳定性。",
+                reasons=reasons,
+                stats=stats,
+            )
 
-        # 非常短、非常简单的小票，直接 single-shot plain
+        # 只要依赖明显样式效果，就优先 fewer_triggers_style
+        if (
+            stats.centered_block_count >= 1
+            or stats.emphasis_block_count >= 1
+            or stats.money_block_count >= 1
+            or stats.style_transitions >= 2
+        ):
+            if stats.centered_block_count >= 1:
+                reasons.append(f"存在居中区块（{stats.centered_block_count} 个），适合保留真实对齐命令。")
+            if stats.emphasis_block_count >= 1:
+                reasons.append(f"存在重点区/大字区（{stats.emphasis_block_count} 个），建议保留 scale/对齐效果。")
+            if stats.money_block_count >= 1:
+                reasons.append(f"存在金额语义区（{stats.money_block_count} 个），更适合保留分区样式。")
+            if stats.style_transitions >= 2:
+                reasons.append(f"样式切换不算少（{stats.style_transitions} 次）。")
+            reasons.append("优先推荐 block_fewer_triggers_style，在减少 trigger 的同时保住标题居中和重点样式。")
+            return StrategyRecommendation(
+                strategy=self.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE,
+                summary="当前 receipt 依赖样式表现，优先保样式而不是强行压成 plain-text。",
+                reasons=reasons,
+                stats=stats,
+            )
+
+        # 很轻、很简单、且不依赖样式时，才推荐 single-shot plain
         if (
             stats.total_nonempty_lines <= 6
             and stats.total_chars <= 90
-            and stats.style_transitions <= 2
+            and stats.style_transitions <= 1
+            and stats.emphasis_block_count == 0
+            and stats.centered_block_count == 0
+            and stats.money_block_count == 0
         ):
-            return self.STRATEGY_SINGLE_SHOT_PLAIN
+            reasons.append(f"内容较短（{stats.total_nonempty_lines} 行，{stats.total_chars} 字符）。")
+            reasons.append("当前几乎不依赖居中/强调/金额分区等样式。")
+            reasons.append("适合 single-shot plain。")
+            return StrategyRecommendation(
+                strategy=self.STRATEGY_SINGLE_SHOT_PLAIN,
+                summary="当前内容很轻，适合单次最终触发。",
+                reasons=reasons,
+                stats=stats,
+            )
 
-        # compact 模板：中短内容优先 single-shot plain，过长则退回 fewer-triggers
-        if template_name == "compact":
-            if stats.total_chars <= 150 and stats.total_nonempty_lines <= 10:
-                return self.STRATEGY_SINGLE_SHOT_PLAIN
-            return self.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE
-
-        # 有明显样式分区/重点区/金额区时，更适合 fewer-triggers
-        if (
-            stats.style_transitions >= 4
-            or stats.emphasis_block_count >= 2
-            or stats.money_block_count >= 2
-        ):
-            return self.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE
-
-        # block 不多、内容不长，也可以 single-shot plain
-        if (
-            stats.total_blocks <= 4
-            and stats.total_chars <= 150
-            and stats.max_block_chars <= 120
-        ):
-            return self.STRATEGY_SINGLE_SHOT_PLAIN
-
-        # 默认偏向较实用的 fewer-triggers
-        return self.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE
+        reasons.append("内容复杂度中等。")
+        reasons.append("默认仍推荐 block_fewer_triggers_style。")
+        return StrategyRecommendation(
+            strategy=self.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE,
+            summary="当前内容更适合少 trigger 且保样式的策略。",
+            reasons=reasons,
+            stats=stats,
+        )
 
     def _analyze_receipt(self, receipt: Receipt) -> ReceiptStats:
         total_blocks = len(receipt.blocks)
@@ -342,6 +407,7 @@ class ReceiptBuilder:
         emphasis_block_count = 0
         money_block_count = 0
         multiline_block_count = 0
+        centered_block_count = 0
 
         prev_style: Optional[BlockStyle] = None
 
@@ -361,6 +427,9 @@ class ReceiptBuilder:
             if len(nonempty) > 1:
                 multiline_block_count += 1
 
+            if block.align == "center" and nonempty:
+                centered_block_count += 1
+
             if self._is_large_or_emphasis_block(block):
                 emphasis_block_count += 1
 
@@ -376,6 +445,7 @@ class ReceiptBuilder:
             emphasis_block_count=emphasis_block_count,
             money_block_count=money_block_count,
             multiline_block_count=multiline_block_count,
+            centered_block_count=centered_block_count,
         )
 
     def _default_form_data(self, template_name: str) -> ReceiptFormData:
@@ -620,7 +690,6 @@ class ReceiptBuilder:
         )
 
     def _build_single_shot_plain_receipt(self, data: ReceiptFormData) -> Receipt:
-        """兼容保留的旧实验模板。"""
         lines: List[str] = []
 
         title = data.title.strip() if data.title else "TITLE"
@@ -850,9 +919,6 @@ class ReceiptBuilder:
         return False
 
     def _merge_adjacent_same_style_blocks(self, blocks: List[ReceiptBlock]) -> List[ReceiptBlock]:
-        """将相邻且样式相同的 block 合并，减少 trigger 次数。
-        当前版本会避开金额区、横线区和大字区的危险边界。
-        """
         if not blocks:
             return []
 
@@ -912,7 +978,6 @@ class ReceiptBuilder:
         return merged_blocks
 
     def _can_merge_blocks(self, prev_block: ReceiptBlock, curr_block: ReceiptBlock) -> bool:
-        """判断两个相邻同样式 block 是否适合合并。"""
         if prev_block.force_reset_style or curr_block.force_reset_style:
             return False
 
@@ -949,7 +1014,6 @@ class ReceiptBuilder:
         return False
 
     def _refine_plain_money_section(self, lines: List[str]) -> List[str]:
-        """对 plain-text 输出中的金额区做空行和边界微调。"""
         if not lines:
             return lines
 

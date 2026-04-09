@@ -1,0 +1,17 @@
+{
+  "selected_template": "default",
+  "forms_by_template": {
+    "default": {
+      "title": "TEST",
+      "date": "2026-03-20",
+      "receipt_no": "1234567890",
+      "items_text": "TEST_GOODS1 1 3.00\nTEST_GOODS2 2 5.00\nmilk 1 10.00",
+      "total": "23.00",
+      "cash": "50.00",
+      "change": "27.00",
+      "footer": "THANK YOU COME AGAIN"
+    }
+  },
+  "use_recommended_strategy": true,
+  "manual_strategy_choice": "block_step_stable"
+}
