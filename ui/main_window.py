@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog
 from tkinter.scrolledtext import ScrolledText
 from typing import Callable, Optional
 
@@ -13,7 +13,6 @@ class MainWindow(tk.Tk):
         self.geometry("1560x980")
         self.minsize(1320, 860)
 
-        # callbacks
         self.on_refresh_ports: Optional[Callable[[], None]] = None
         self.on_toggle_uart1: Optional[Callable[[], None]] = None
         self.on_toggle_uart2: Optional[Callable[[], None]] = None
@@ -37,6 +36,8 @@ class MainWindow(tk.Tk):
         self.on_start_new_receipt: Optional[Callable[[], None]] = None
         self.on_clear_history_frames: Optional[Callable[[], None]] = None
         self.on_preview_option_changed: Optional[Callable[[], None]] = None
+        self.on_browse_image: Optional[Callable[[], None]] = None
+        self.on_send_image: Optional[Callable[[], None]] = None
 
         self._build_vars()
         self._build_ui()
@@ -59,6 +60,12 @@ class MainWindow(tk.Tk):
         self.auto_crop_var = tk.BooleanVar(value=False)
         self.zoom_var = tk.IntVar(value=4)
 
+        self.image_path_var = tk.StringVar(value="")
+        self.image_width_var = tk.StringVar(value="384")
+        self.image_max_height_var = tk.StringVar(value="256")
+        self.image_threshold_var = tk.StringVar(value="auto")
+        self.image_dither_var = tk.BooleanVar(value=True)
+
         self.receipt_template_var = tk.StringVar(value="default")
         self.send_strategy_var = tk.StringVar(value="block_fewer_triggers_style")
         self.use_recommended_strategy_var = tk.BooleanVar(value=True)
@@ -69,6 +76,15 @@ class MainWindow(tk.Tk):
         self.receipt_total_var = tk.StringVar(value="23.00")
         self.receipt_cash_var = tk.StringVar(value="50.00")
         self.receipt_change_var = tk.StringVar(value="27.00")
+        self.receipt_logo_image_path_var = tk.StringVar(value="")
+        self.receipt_footer_image_path_var = tk.StringVar(value="")
+        self.receipt_image_width_var = tk.StringVar(value="220")
+        self.receipt_image_max_height_var = tk.StringVar(value="96")
+        self.receipt_image_threshold_var = tk.StringVar(value="auto")
+        self.receipt_image_dither_var = tk.BooleanVar(value=True)
+        self.receipt_qr_content_var = tk.StringVar(value="")
+        self.receipt_qr_size_var = tk.StringVar(value="180")
+        self.receipt_qr_border_var = tk.StringVar(value="2")
 
         self.recommend_mode_var = tk.StringVar(value="推荐模式（自动）")
         self.recommend_system_var = tk.StringVar(value="-")
@@ -131,6 +147,23 @@ class MainWindow(tk.Tk):
         self.btn_connect2.grid(row=2, column=3, pady=(8, 0), sticky="ew")
         ttk.Label(serial_frame, textvariable=self.status_var, foreground="#0066cc").grid(row=3, column=0, columnspan=5, sticky="w", pady=(8, 0))
 
+        image_frame = ttk.LabelFrame(self.left_inner, text="图片打印（第一版单图）", padding=10)
+        image_frame.pack(fill="x", pady=(0, 10))
+        ttk.Label(image_frame, text="图片路径").grid(row=0, column=0, sticky="w")
+        ttk.Entry(image_frame, textvariable=self.image_path_var, width=42).grid(row=0, column=1, columnspan=2, sticky="ew", padx=4, pady=2)
+        ttk.Button(image_frame, text="选择图片", command=self._safe_call(lambda: self.on_browse_image)).grid(row=0, column=3, padx=(6, 0))
+        ttk.Label(image_frame, text="目标宽度").grid(row=1, column=0, sticky="w")
+        ttk.Entry(image_frame, textvariable=self.image_width_var, width=10).grid(row=1, column=1, sticky="w", padx=4, pady=2)
+        ttk.Label(image_frame, text="最大高度").grid(row=1, column=2, sticky="e")
+        ttk.Entry(image_frame, textvariable=self.image_max_height_var, width=10).grid(row=1, column=3, sticky="w", padx=4, pady=2)
+        ttk.Label(image_frame, text="阈值").grid(row=2, column=0, sticky="w")
+        ttk.Entry(image_frame, textvariable=self.image_threshold_var, width=10).grid(row=2, column=1, sticky="w", padx=4, pady=2)
+        ttk.Checkbutton(image_frame, text="抖动优化（推荐，用于普通彩色图片）", variable=self.image_dither_var).grid(row=2, column=2, columnspan=2, sticky="w")
+        ttk.Button(image_frame, text="发送图片", command=self._safe_call(lambda: self.on_send_image)).grid(row=3, column=3, sticky="e", pady=(6, 0))
+        ttk.Label(image_frame, text="说明：现在支持普通彩色图片/灰度图/黑白图直接输入。默认先自动灰度化、自动增强，并用抖动优化提升普通图片可打印性；阈值可填 auto。", foreground="#555555", wraplength=500, justify="left").grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        image_frame.columnconfigure(1, weight=1)
+        image_frame.columnconfigure(2, weight=1)
+
         send_text_frame = ttk.LabelFrame(self.left_inner, text="发送普通文本（UART1）", padding=10)
         send_text_frame.pack(fill="x", pady=(0, 10))
         ttk.Entry(send_text_frame, textvariable=self.text_to_send, width=40).grid(row=0, column=0, columnspan=3, sticky="ew")
@@ -156,79 +189,39 @@ class MainWindow(tk.Tk):
 
         receipt_frame = ttk.LabelFrame(self.left_inner, text="测试小票模板", padding=10)
         receipt_frame.pack(fill="x", pady=(0, 10))
-
         ttk.Label(receipt_frame, text="模板").grid(row=0, column=0, sticky="w")
-        self.receipt_template_combo = ttk.Combobox(
-            receipt_frame,
-            textvariable=self.receipt_template_var,
-            state="readonly",
-            width=20,
-        )
+        self.receipt_template_combo = ttk.Combobox(receipt_frame, textvariable=self.receipt_template_var, state="readonly", width=20)
         self.receipt_template_combo.grid(row=0, column=1, padx=6, sticky="ew")
         self.receipt_template_combo.bind("<<ComboboxSelected>>", self._on_receipt_template_selected)
 
-        self.use_recommended_strategy_check = ttk.Checkbutton(
-            receipt_frame,
-            text="使用模板推荐策略（默认）",
-            variable=self.use_recommended_strategy_var,
-            command=self._safe_call(lambda: self.on_send_strategy_mode_changed),
-        )
+        self.use_recommended_strategy_check = ttk.Checkbutton(receipt_frame, text="使用模板推荐策略（默认）", variable=self.use_recommended_strategy_var, command=self._safe_call(lambda: self.on_send_strategy_mode_changed))
         self.use_recommended_strategy_check.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         ttk.Label(receipt_frame, text="高级手动策略").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        self.send_strategy_combo = ttk.Combobox(
-            receipt_frame,
-            textvariable=self.send_strategy_var,
-            state="readonly",
-            width=20,
-        )
+        self.send_strategy_combo = ttk.Combobox(receipt_frame, textvariable=self.send_strategy_var, state="readonly", width=20)
         self.send_strategy_combo.grid(row=2, column=1, padx=6, pady=(6, 0), sticky="ew")
         self.send_strategy_combo.bind("<<ComboboxSelected>>", self._on_send_strategy_selected)
-
         ttk.Button(receipt_frame, text="打印测试小票", command=self._safe_call(lambda: self.on_send_test_receipt)).grid(row=0, column=2, rowspan=3, sticky="nsew")
-
-        ttk.Label(
-            receipt_frame,
-            text="普通模式自动选策略；关闭推荐后可手动切换 stable / fewer_triggers / single_shot。",
-            foreground="#555555",
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(receipt_frame, text="普通模式自动选策略；关闭推荐后可手动切换 stable / fewer_triggers / single_shot。", foreground="#555555").grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
         receipt_frame.columnconfigure(1, weight=1)
 
         recommend_frame = ttk.LabelFrame(self.left_inner, text="策略推荐说明", padding=10)
         recommend_frame.pack(fill="x", pady=(0, 10))
         recommend_frame.columnconfigure(1, weight=1)
-
         ttk.Label(recommend_frame, text="当前模式").grid(row=0, column=0, sticky="nw")
         ttk.Label(recommend_frame, textvariable=self.recommend_mode_var, foreground="#0066cc").grid(row=0, column=1, sticky="w")
-
         ttk.Label(recommend_frame, text="系统推荐").grid(row=1, column=0, sticky="nw", pady=(4, 0))
         ttk.Label(recommend_frame, textvariable=self.recommend_system_var).grid(row=1, column=1, sticky="w", pady=(4, 0))
-
         ttk.Label(recommend_frame, text="当前生效").grid(row=2, column=0, sticky="nw", pady=(4, 0))
         ttk.Label(recommend_frame, textvariable=self.recommend_effective_var).grid(row=2, column=1, sticky="w", pady=(4, 0))
-
         ttk.Label(recommend_frame, text="摘要").grid(row=3, column=0, sticky="nw", pady=(6, 0))
-        ttk.Label(
-            recommend_frame,
-            textvariable=self.recommend_summary_var,
-            wraplength=430,
-            justify="left",
-            foreground="#333333",
-        ).grid(row=3, column=1, sticky="w", pady=(6, 0))
-
+        ttk.Label(recommend_frame, textvariable=self.recommend_summary_var, wraplength=430, justify="left", foreground="#333333").grid(row=3, column=1, sticky="w", pady=(6, 0))
         ttk.Label(recommend_frame, text="依据").grid(row=4, column=0, sticky="nw", pady=(6, 0))
         self.recommend_reasons_text = ScrolledText(recommend_frame, height=5, width=52, font=("Consolas", 9))
         self.recommend_reasons_text.grid(row=4, column=1, sticky="ew", pady=(6, 0))
         self.recommend_reasons_text.configure(state="disabled")
-
         ttk.Label(recommend_frame, text="统计").grid(row=5, column=0, sticky="nw", pady=(6, 0))
-        ttk.Label(
-            recommend_frame,
-            textvariable=self.recommend_stats_var,
-            wraplength=430,
-            justify="left",
-            foreground="#666666",
-        ).grid(row=5, column=1, sticky="w", pady=(6, 0))
+        ttk.Label(recommend_frame, textvariable=self.recommend_stats_var, wraplength=430, justify="left", foreground="#666666").grid(row=5, column=1, sticky="w", pady=(6, 0))
 
         receipt_param_frame = ttk.LabelFrame(self.left_inner, text="测试票参数", padding=10)
         receipt_param_frame.pack(fill="x", pady=(0, 10))
@@ -238,21 +231,38 @@ class MainWindow(tk.Tk):
         ttk.Entry(receipt_param_frame, textvariable=self.receipt_date_var, width=18).grid(row=1, column=1, sticky="ew", padx=4, pady=2)
         ttk.Label(receipt_param_frame, text="编号").grid(row=1, column=2, sticky="w")
         ttk.Entry(receipt_param_frame, textvariable=self.receipt_no_var, width=18).grid(row=1, column=3, sticky="ew", padx=4, pady=2)
-
         ttk.Label(receipt_param_frame, text="总价").grid(row=2, column=0, sticky="w")
         ttk.Entry(receipt_param_frame, textvariable=self.receipt_total_var, width=18).grid(row=2, column=1, sticky="ew", padx=4, pady=2)
         ttk.Label(receipt_param_frame, text="现金").grid(row=2, column=2, sticky="w")
         ttk.Entry(receipt_param_frame, textvariable=self.receipt_cash_var, width=18).grid(row=2, column=3, sticky="ew", padx=4, pady=2)
         ttk.Label(receipt_param_frame, text="找零").grid(row=3, column=0, sticky="w")
         ttk.Entry(receipt_param_frame, textvariable=self.receipt_change_var, width=18).grid(row=3, column=1, sticky="ew", padx=4, pady=2)
-
-        ttk.Label(receipt_param_frame, text="明细（多行）").grid(row=4, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(receipt_param_frame, text="顶部 Logo 图").grid(row=4, column=0, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_logo_image_path_var).grid(row=4, column=1, columnspan=2, sticky="ew", padx=4, pady=2)
+        ttk.Button(receipt_param_frame, text="选择", command=lambda: self._browse_path_into_var(self.receipt_logo_image_path_var)).grid(row=4, column=3, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="底部图片").grid(row=5, column=0, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_footer_image_path_var).grid(row=5, column=1, columnspan=2, sticky="ew", padx=4, pady=2)
+        ttk.Button(receipt_param_frame, text="选择", command=lambda: self._browse_path_into_var(self.receipt_footer_image_path_var)).grid(row=5, column=3, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="嵌图宽度").grid(row=6, column=0, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_image_width_var, width=18).grid(row=6, column=1, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="嵌图最大高").grid(row=6, column=2, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_image_max_height_var, width=18).grid(row=6, column=3, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="嵌图阈值").grid(row=7, column=0, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_image_threshold_var, width=18).grid(row=7, column=1, sticky="ew", padx=4, pady=2)
+        ttk.Checkbutton(receipt_param_frame, text="嵌图抖动优化", variable=self.receipt_image_dither_var, command=self._notify_receipt_form_changed).grid(row=7, column=2, columnspan=2, sticky="w", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="内置二维码内容").grid(row=8, column=0, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_qr_content_var).grid(row=8, column=1, columnspan=3, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="二维码尺寸").grid(row=9, column=0, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_qr_size_var, width=18).grid(row=9, column=1, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="二维码边距").grid(row=9, column=2, sticky="w")
+        ttk.Entry(receipt_param_frame, textvariable=self.receipt_qr_border_var, width=18).grid(row=9, column=3, sticky="ew", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="明细（多行）").grid(row=10, column=0, sticky="nw", pady=(6, 0))
         self.receipt_items_text = ScrolledText(receipt_param_frame, height=6, width=44, font=("Consolas", 10))
-        self.receipt_items_text.grid(row=4, column=1, columnspan=3, sticky="ew", padx=4, pady=(6, 2))
-        ttk.Label(receipt_param_frame, text="尾部文案（多行）").grid(row=5, column=0, sticky="nw", pady=(6, 0))
+        self.receipt_items_text.grid(row=10, column=1, columnspan=3, sticky="ew", padx=4, pady=(6, 2))
+        ttk.Label(receipt_param_frame, text="尾部文案（多行）").grid(row=11, column=0, sticky="nw", pady=(6, 0))
         self.receipt_footer_text = ScrolledText(receipt_param_frame, height=3, width=44, font=("Consolas", 10))
-        self.receipt_footer_text.grid(row=5, column=1, columnspan=3, sticky="ew", padx=4, pady=(6, 2))
-        ttk.Label(receipt_param_frame, text="提示：这里改的是测试票内容，不影响 UART1 普通文本发送区。", foreground="#555555").grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.receipt_footer_text.grid(row=11, column=1, columnspan=3, sticky="ew", padx=4, pady=(6, 2))
+        ttk.Label(receipt_param_frame, text="提示：现在支持直接输入二维码内容生成内置二维码。若二维码内容不为空，则优先使用内置二维码，其次才使用底部图片。", foreground="#555555", wraplength=500, justify="left").grid(row=12, column=0, columnspan=4, sticky="w", pady=(6, 0))
         for i in range(4):
             receipt_param_frame.columnconfigure(i, weight=1 if i else 0)
 
@@ -282,12 +292,7 @@ class MainWindow(tk.Tk):
         info_frame = ttk.Frame(right)
         info_frame.grid(row=0, column=0, sticky="ew")
         info_frame.columnconfigure(0, weight=1)
-        ttk.Checkbutton(
-            info_frame,
-            text="SETTINGS 自动裁边（会隐藏对齐效果，仅调试时使用）",
-            variable=self.auto_crop_var,
-            command=self._safe_call(lambda: self.on_preview_option_changed)
-        ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(info_frame, text="SETTINGS 自动裁边（会隐藏对齐效果，仅调试时使用）", variable=self.auto_crop_var, command=self._safe_call(lambda: self.on_preview_option_changed)).grid(row=0, column=0, sticky="w")
         ttk.Label(info_frame, text="缩放").grid(row=0, column=1, padx=(20, 2))
         zoom_spin = ttk.Spinbox(info_frame, from_=1, to=20, textvariable=self.zoom_var, width=6, command=self._safe_call(lambda: self.on_preview_option_changed))
         zoom_spin.grid(row=0, column=2)
@@ -322,6 +327,14 @@ class MainWindow(tk.Tk):
             self.receipt_total_var,
             self.receipt_cash_var,
             self.receipt_change_var,
+            self.receipt_logo_image_path_var,
+            self.receipt_footer_image_path_var,
+            self.receipt_image_width_var,
+            self.receipt_image_max_height_var,
+            self.receipt_image_threshold_var,
+            self.receipt_qr_content_var,
+            self.receipt_qr_size_var,
+            self.receipt_qr_border_var,
         ]
 
         for var in watched_vars:
@@ -347,6 +360,15 @@ class MainWindow(tk.Tk):
     def _on_send_strategy_selected(self, _event=None):
         if self.on_send_strategy_changed:
             self.on_send_strategy_changed()
+
+    def _browse_path_into_var(self, var: tk.StringVar):
+        path = filedialog.askopenfilename(
+            title="选择图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.gif"), ("所有文件", "*.*")],
+        )
+        if path:
+            var.set(path)
+            self._notify_receipt_form_changed()
 
     def _safe_call(self, cb_getter: Callable[[], Optional[Callable[[], None]]]):
         def _wrapped():
@@ -400,7 +422,6 @@ class MainWindow(tk.Tk):
         canvas.bind("<Leave>", _unbind_all_handlers)
         inner_widget.bind("<Leave>", _unbind_all_handlers)
 
-    # ===== 供 controller 调用的 UI 更新接口 =====
     def set_ports(self, ports: list[str]):
         self.port1_combo["values"] = ports
         self.port2_combo["values"] = ports
@@ -447,6 +468,15 @@ class MainWindow(tk.Tk):
         self.receipt_total_var.set(data.get("total", ""))
         self.receipt_cash_var.set(data.get("cash", ""))
         self.receipt_change_var.set(data.get("change", ""))
+        self.receipt_logo_image_path_var.set(data.get("logo_image_path", ""))
+        self.receipt_footer_image_path_var.set(data.get("footer_image_path", ""))
+        self.receipt_image_width_var.set(data.get("image_width", "220"))
+        self.receipt_image_max_height_var.set(data.get("image_max_height", "96"))
+        self.receipt_image_threshold_var.set(data.get("image_threshold", "auto"))
+        self.receipt_image_dither_var.set(str(data.get("image_dither", "1")).strip().lower() not in ("0", "false", "off", "no", ""))
+        self.receipt_qr_content_var.set(data.get("qr_content", ""))
+        self.receipt_qr_size_var.set(data.get("qr_size", "180"))
+        self.receipt_qr_border_var.set(data.get("qr_border", "2"))
 
         self.receipt_items_text.delete("1.0", "end")
         self.receipt_items_text.insert("1.0", data.get("items_text", ""))
@@ -456,16 +486,7 @@ class MainWindow(tk.Tk):
         self.receipt_footer_text.insert("1.0", data.get("footer", ""))
         self.receipt_footer_text.edit_modified(False)
 
-    def set_strategy_recommendation_info(
-        self,
-        *,
-        mode_text: str,
-        recommended_strategy: str,
-        effective_strategy: str,
-        summary: str,
-        reasons: list[str],
-        stats_text: str,
-    ):
+    def set_strategy_recommendation_info(self, *, mode_text: str, recommended_strategy: str, effective_strategy: str, summary: str, reasons: list[str], stats_text: str):
         self.recommend_mode_var.set(mode_text)
         self.recommend_system_var.set(recommended_strategy)
         self.recommend_effective_var.set(effective_strategy)
@@ -486,6 +507,9 @@ class MainWindow(tk.Tk):
 
     def set_uart2_connected(self, connected: bool):
         self.btn_connect2.config(text="断开 UART2" if connected else "连接 UART2")
+
+    def set_image_path(self, path: str):
+        self.image_path_var.set(path)
 
     def append_log(self, text: str):
         self.log_text.configure(state="normal")
@@ -535,6 +559,21 @@ class MainWindow(tk.Tk):
     def get_scale(self) -> str:
         return self.scale_var.get()
 
+    def get_image_path(self) -> str:
+        return self.image_path_var.get().strip()
+
+    def get_image_width(self) -> str:
+        return self.image_width_var.get().strip()
+
+    def get_image_max_height(self) -> str:
+        return self.image_max_height_var.get().strip()
+
+    def get_image_dither(self) -> bool:
+        return bool(self.image_dither_var.get())
+
+    def get_image_threshold(self) -> str:
+        return self.image_threshold_var.get().strip()
+
     def get_receipt_template(self) -> str:
         return self.receipt_template_var.get().strip()
 
@@ -554,6 +593,15 @@ class MainWindow(tk.Tk):
             "cash": self.receipt_cash_var.get().strip(),
             "change": self.receipt_change_var.get().strip(),
             "footer": self.receipt_footer_text.get("1.0", "end").strip(),
+            "logo_image_path": self.receipt_logo_image_path_var.get().strip(),
+            "footer_image_path": self.receipt_footer_image_path_var.get().strip(),
+            "image_width": self.receipt_image_width_var.get().strip(),
+            "image_max_height": self.receipt_image_max_height_var.get().strip(),
+            "image_threshold": self.receipt_image_threshold_var.get().strip(),
+            "image_dither": "1" if self.receipt_image_dither_var.get() else "0",
+            "qr_content": self.receipt_qr_content_var.get().strip(),
+            "qr_size": self.receipt_qr_size_var.get().strip(),
+            "qr_border": self.receipt_qr_border_var.get().strip(),
         }
 
     def get_zoom(self) -> int:
