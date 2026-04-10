@@ -97,6 +97,7 @@ class ReceiptBlock:
     qr_content: str = ""
     qr_size: int = 180
     qr_border: int = 2
+    qr_error_correction: str = "M"
 
     def is_image(self) -> bool:
         return self.block_type == "image"
@@ -131,6 +132,7 @@ class ReceiptFormData:
     qr_content: str
     qr_size: str
     qr_border: str
+    qr_error_correction: str
 
 
 @dataclass(frozen=True)
@@ -177,6 +179,7 @@ class ReceiptBuilder:
             "single_shot_plain": self._build_single_shot_plain_receipt,
             "logo_receipt": self._build_logo_receipt,
             "qr_receipt": self._build_qr_receipt,
+            "brand_qr_receipt": self._build_brand_qr_receipt,
         }
 
     def list_templates(self) -> List[str]:
@@ -236,6 +239,7 @@ class ReceiptBuilder:
             "qr_content": data.qr_content,
             "qr_size": data.qr_size,
             "qr_border": data.qr_border,
+            "qr_error_correction": data.qr_error_correction,
         }
 
     def build_receipt(self, template_name: str = "default", overrides: Optional[Dict[str, str]] = None) -> Receipt:
@@ -463,6 +467,7 @@ class ReceiptBuilder:
             qr_content="",
             qr_size="180",
             qr_border="2",
+            qr_error_correction="M",
         )
         if template_name == "compact":
             base.items_text = "COLA 1 3.00\nMILK 1 10.00"
@@ -490,6 +495,15 @@ class ReceiptBuilder:
             base.qr_content = "https://example.com/pay/demo-123456"
             base.qr_size = "180"
             base.qr_border = "2"
+            base.qr_error_correction = "M"
+        elif template_name == "brand_qr_receipt":
+            base.footer = "SCAN TO JOIN"
+            base.image_width = "220"
+            base.image_max_height = "96"
+            base.qr_content = "https://example.com/brand/join"
+            base.qr_size = "180"
+            base.qr_border = "2"
+            base.qr_error_correction = "Q"
         return base
 
     @staticmethod
@@ -518,6 +532,7 @@ class ReceiptBuilder:
             qr_content=_value("qr_content", base.qr_content),
             qr_size=_value("qr_size", base.qr_size),
             qr_border=_value("qr_border", base.qr_border),
+            qr_error_correction=_value("qr_error_correction", base.qr_error_correction),
         )
 
     @staticmethod
@@ -640,6 +655,10 @@ class ReceiptBuilder:
             parsed = default
         return max(0, min(8, parsed))
 
+    def _parse_qr_error_correction(self, value: str, default: str = "M") -> str:
+        level = str(value).strip().upper() if value is not None else default
+        return level if level in ("L", "M", "Q", "H") else default
+
     def _append_optional_logo_block(self, blocks: List[ReceiptBlock], data: ReceiptFormData):
         if data.logo_image_path.strip():
             blocks.append(
@@ -662,6 +681,7 @@ class ReceiptBuilder:
                     align="center",
                     qr_size=self._parse_qr_size(data.qr_size, 180),
                     qr_border=self._parse_qr_border(data.qr_border, 2),
+                    qr_error_correction=self._parse_qr_error_correction(data.qr_error_correction, "M"),
                 )
             )
             return
@@ -857,6 +877,39 @@ class ReceiptBuilder:
             blocks=blocks,
         )
 
+    def _build_brand_qr_receipt(self, data: ReceiptFormData) -> Receipt:
+        blocks: List[ReceiptBlock] = []
+        self._append_optional_logo_block(blocks, data)
+        blocks.extend([
+            self.title_block(data.title or "TITLE", scale=2, force_reset_style=True),
+            self.center_block(["BRAND SERVICE"], scale=1),
+            self.rule_block(),
+        ])
+
+        meta_lines: List[str] = []
+        if data.date:
+            meta_lines.append(self._pad_lr("DATE", data.date, self.RECEIPT_WIDTH))
+        if data.receipt_no:
+            meta_lines.append(self._pad_lr("RECEIPT NO", data.receipt_no, self.RECEIPT_WIDTH))
+        if meta_lines:
+            blocks.append(self.text_block(meta_lines, align="left", scale=1, force_reset_style=True))
+
+        item_lines = self._format_item_rows(data.items_text)
+        if item_lines:
+            blocks.extend([self.rule_block(), self.text_block(item_lines, align="left", scale=1)])
+
+        if data.total:
+            blocks.extend([self.rule_block(), self.center_block([f"TOTAL {data.total}"], scale=2, force_reset_style=True)])
+
+        footer_lines = self._split_nonempty_lines(data.footer) or ["SCAN TO JOIN"]
+        blocks.append(self.center_block(footer_lines, scale=1, force_reset_style=True))
+        self._append_optional_footer_visual_block(blocks, data)
+        return Receipt(
+            name="brand_qr_receipt",
+            description="品牌模板：顶部 Logo + 正文 + 底部二维码/图片。",
+            blocks=blocks,
+        )
+
     def title_block(self, text: str, *, scale: int = 2, line_spacing: Optional[int] = 0, force_reset_style: bool = False) -> ReceiptBlock:
         return ReceiptBlock(
             block_type="text",
@@ -930,6 +983,7 @@ class ReceiptBuilder:
         align: str = "center",
         qr_size: int = 180,
         qr_border: int = 2,
+        qr_error_correction: str = "M",
         trigger_print: bool = True,
     ) -> ReceiptBlock:
         return ReceiptBlock(
@@ -940,6 +994,7 @@ class ReceiptBuilder:
             qr_content=qr_content.strip(),
             qr_size=qr_size,
             qr_border=qr_border,
+            qr_error_correction=qr_error_correction,
             image_width=qr_size,
             image_max_height=qr_size,
             image_dither=False,

@@ -16,9 +16,10 @@
       "image_max_height": "96",
       "image_threshold": "auto",
       "image_dither": "1",
-      "qr_content": "",
+      "qr_content": "ababababbaba",
       "qr_size": "180",
-      "qr_border": "2"
+      "qr_border": "2",
+      "qr_error_correction": "M"
     },
     "qr_receipt": {
       "title": "YINJIAN DRINKS",

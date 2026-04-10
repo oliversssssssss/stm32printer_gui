@@ -6,7 +6,7 @@ from typing import Iterator, Optional
 
 from PIL import Image, ImageOps
 import qrcode
-from qrcode.constants import ERROR_CORRECT_M
+from qrcode.constants import ERROR_CORRECT_L, ERROR_CORRECT_M, ERROR_CORRECT_Q, ERROR_CORRECT_H
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,14 @@ class ImageProcessor:
     MAX_WIDTH = 384
     MAX_HEIGHT = 256
     MAX_QR_SIZE = 256
+
+
+    QR_ERROR_CORRECTION_MAP = {
+        "L": ERROR_CORRECT_L,
+        "M": ERROR_CORRECT_M,
+        "Q": ERROR_CORRECT_Q,
+        "H": ERROR_CORRECT_H,
+    }
 
     @staticmethod
     def _composite_to_white(img: Image.Image) -> Image.Image:
@@ -190,12 +198,18 @@ class ImageProcessor:
             )
 
     @classmethod
+    def parse_qr_error_correction(cls, value: str | None) -> str:
+        level = str(value or "M").strip().upper() or "M"
+        return level if level in cls.QR_ERROR_CORRECTION_MAP else "M"
+
+    @classmethod
     def prepare_qr_text(
         cls,
         qr_text: str,
         *,
         target_size: int = 180,
         qr_border: int = 2,
+        error_correction: str = "M",
         canvas_width: Optional[int] = None,
         align: str = "center",
     ) -> PreparedImage:
@@ -210,9 +224,11 @@ class ImageProcessor:
         target_size = min(target_size, cls.MAX_QR_SIZE)
         qr_border = max(0, min(8, qr_border))
 
+        qr_level = cls.parse_qr_error_correction(error_correction)
+
         qr = qrcode.QRCode(
             version=None,
-            error_correction=ERROR_CORRECT_M,
+            error_correction=cls.QR_ERROR_CORRECTION_MAP[qr_level],
             box_size=10,
             border=qr_border,
         )

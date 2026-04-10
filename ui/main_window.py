@@ -85,6 +85,7 @@ class MainWindow(tk.Tk):
         self.receipt_qr_content_var = tk.StringVar(value="")
         self.receipt_qr_size_var = tk.StringVar(value="180")
         self.receipt_qr_border_var = tk.StringVar(value="2")
+        self.receipt_qr_error_correction_var = tk.StringVar(value="M")
 
         self.recommend_mode_var = tk.StringVar(value="推荐模式（自动）")
         self.recommend_system_var = tk.StringVar(value="-")
@@ -256,13 +257,18 @@ class MainWindow(tk.Tk):
         ttk.Entry(receipt_param_frame, textvariable=self.receipt_qr_size_var, width=18).grid(row=9, column=1, sticky="ew", padx=4, pady=2)
         ttk.Label(receipt_param_frame, text="二维码边距").grid(row=9, column=2, sticky="w")
         ttk.Entry(receipt_param_frame, textvariable=self.receipt_qr_border_var, width=18).grid(row=9, column=3, sticky="ew", padx=4, pady=2)
-        ttk.Label(receipt_param_frame, text="明细（多行）").grid(row=10, column=0, sticky="nw", pady=(6, 0))
+        ttk.Label(receipt_param_frame, text="纠错等级").grid(row=10, column=0, sticky="w")
+        self.receipt_qr_error_combo = ttk.Combobox(receipt_param_frame, textvariable=self.receipt_qr_error_correction_var, state="readonly", values=["L", "M", "Q", "H"], width=16)
+        self.receipt_qr_error_combo.grid(row=10, column=1, sticky="ew", padx=4, pady=2)
+        self.receipt_qr_error_combo.bind("<<ComboboxSelected>>", lambda _e: self._notify_receipt_form_changed())
+        ttk.Label(receipt_param_frame, text="说明：纠错等级越高，二维码越耐脏，但模块更密。常规建议使用 M 或 Q。", foreground="#666666", wraplength=320, justify="left").grid(row=10, column=2, columnspan=2, sticky="w", padx=4, pady=2)
+        ttk.Label(receipt_param_frame, text="明细（多行）").grid(row=11, column=0, sticky="nw", pady=(6, 0))
         self.receipt_items_text = ScrolledText(receipt_param_frame, height=6, width=44, font=("Consolas", 10))
-        self.receipt_items_text.grid(row=10, column=1, columnspan=3, sticky="ew", padx=4, pady=(6, 2))
-        ttk.Label(receipt_param_frame, text="尾部文案（多行）").grid(row=11, column=0, sticky="nw", pady=(6, 0))
+        self.receipt_items_text.grid(row=11, column=1, columnspan=3, sticky="ew", padx=4, pady=(6, 2))
+        ttk.Label(receipt_param_frame, text="尾部文案（多行）").grid(row=12, column=0, sticky="nw", pady=(6, 0))
         self.receipt_footer_text = ScrolledText(receipt_param_frame, height=3, width=44, font=("Consolas", 10))
-        self.receipt_footer_text.grid(row=11, column=1, columnspan=3, sticky="ew", padx=4, pady=(6, 2))
-        ttk.Label(receipt_param_frame, text="提示：现在支持直接输入二维码内容生成内置二维码。若二维码内容不为空，则优先使用内置二维码，其次才使用底部图片。", foreground="#555555", wraplength=500, justify="left").grid(row=12, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.receipt_footer_text.grid(row=12, column=1, columnspan=3, sticky="ew", padx=4, pady=(6, 2))
+        ttk.Label(receipt_param_frame, text="提示：现在支持直接输入二维码内容生成内置二维码。若二维码内容不为空，则优先使用内置二维码，其次才使用底部图片。", foreground="#555555", wraplength=500, justify="left").grid(row=13, column=0, columnspan=4, sticky="w", pady=(6, 0))
         for i in range(4):
             receipt_param_frame.columnconfigure(i, weight=1 if i else 0)
 
@@ -335,6 +341,7 @@ class MainWindow(tk.Tk):
             self.receipt_qr_content_var,
             self.receipt_qr_size_var,
             self.receipt_qr_border_var,
+            self.receipt_qr_error_correction_var,
         ]
 
         for var in watched_vars:
@@ -477,6 +484,7 @@ class MainWindow(tk.Tk):
         self.receipt_qr_content_var.set(data.get("qr_content", ""))
         self.receipt_qr_size_var.set(data.get("qr_size", "180"))
         self.receipt_qr_border_var.set(data.get("qr_border", "2"))
+        self.receipt_qr_error_correction_var.set(data.get("qr_error_correction", "M"))
 
         self.receipt_items_text.delete("1.0", "end")
         self.receipt_items_text.insert("1.0", data.get("items_text", ""))
@@ -602,6 +610,7 @@ class MainWindow(tk.Tk):
             "qr_content": self.receipt_qr_content_var.get().strip(),
             "qr_size": self.receipt_qr_size_var.get().strip(),
             "qr_border": self.receipt_qr_border_var.get().strip(),
+            "qr_error_correction": self.receipt_qr_error_correction_var.get().strip(),
         }
 
     def get_zoom(self) -> int:
