@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -93,11 +94,15 @@ class ReceiptBlock:
     image_threshold: Optional[int] = None
     image_dither: bool = True
 
-    image_kind: str = "file"  # file / qr
+    image_kind: str = "file"  # file / qr / barcode
     qr_content: str = ""
     qr_size: int = 180
     qr_border: int = 2
     qr_error_correction: str = "M"
+
+    barcode_content: str = ""
+    barcode_width: int = 260
+    barcode_height: int = 72
 
     def is_image(self) -> bool:
         return self.block_type == "image"
@@ -133,6 +138,9 @@ class ReceiptFormData:
     qr_size: str
     qr_border: str
     qr_error_correction: str
+    barcode_content: str
+    barcode_width: str
+    barcode_height: str
 
 
 @dataclass(frozen=True)
@@ -148,6 +156,7 @@ class ReceiptStats:
     centered_block_count: int
     image_block_count: int
     qr_block_count: int
+    barcode_block_count: int
 
 
 @dataclass(frozen=True)
@@ -180,6 +189,7 @@ class ReceiptBuilder:
             "logo_receipt": self._build_logo_receipt,
             "qr_receipt": self._build_qr_receipt,
             "brand_qr_receipt": self._build_brand_qr_receipt,
+            "barcode_receipt": self._build_barcode_receipt,
         }
 
     def list_templates(self) -> List[str]:
@@ -198,19 +208,7 @@ class ReceiptBuilder:
     def explain_recommended_strategy(self, template_name: str, receipt: Optional[Receipt] = None) -> StrategyRecommendation:
         if receipt is None:
             strategy = self._get_template_default_strategy(template_name)
-            empty_stats = ReceiptStats(
-                total_blocks=0,
-                total_nonempty_lines=0,
-                total_chars=0,
-                max_block_chars=0,
-                style_transitions=0,
-                emphasis_block_count=0,
-                money_block_count=0,
-                multiline_block_count=0,
-                centered_block_count=0,
-                image_block_count=0,
-                qr_block_count=0,
-            )
+            empty_stats = ReceiptStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
             return StrategyRecommendation(
                 strategy=strategy,
                 summary=f"当前按模板默认推荐：{strategy}",
@@ -240,13 +238,15 @@ class ReceiptBuilder:
             "qr_size": data.qr_size,
             "qr_border": data.qr_border,
             "qr_error_correction": data.qr_error_correction,
+            "barcode_content": data.barcode_content,
+            "barcode_width": data.barcode_width,
+            "barcode_height": data.barcode_height,
         }
 
     def build_receipt(self, template_name: str = "default", overrides: Optional[Dict[str, str]] = None) -> Receipt:
         builder = self._templates.get(template_name)
         if builder is None:
             raise ValueError(f"未知测试小票模板: {template_name}")
-
         form_data = self._default_form_data(template_name)
         if overrides:
             form_data = self._merge_form_data(form_data, overrides)
@@ -268,7 +268,6 @@ class ReceiptBuilder:
     def _encode_receipt_block_step_stable(self, receipt: Receipt) -> SendPlan:
         plan = SendPlan()
         plan.add_step(CommandBuilder.init_printer())
-
         last_style: Optional[BlockStyle] = None
         for block in receipt.blocks:
             if block.is_image():
@@ -286,7 +285,6 @@ class ReceiptBuilder:
         plain_lines = self._flatten_receipt_to_plain_lines(receipt)
         plain_lines = self._refine_plain_money_section(plain_lines)
         text_blob = "\n".join(plain_lines).strip("\n")
-
         plan.add_step(CommandBuilder.init_printer())
         plan.add_step(CommandBuilder.align_left())
         plan.add_step(CommandBuilder.scale(1))
@@ -302,7 +300,6 @@ class ReceiptBuilder:
         merged_blocks = self._merge_adjacent_same_style_blocks_mixed(receipt.blocks)
         plan = SendPlan()
         plan.add_step(CommandBuilder.init_printer())
-
         last_style: Optional[BlockStyle] = None
         for block in merged_blocks:
             if block.is_image():
@@ -316,7 +313,7 @@ class ReceiptBuilder:
         return plan
 
     def _get_template_default_strategy(self, template_name: str) -> str:
-        if template_name in ("logo_receipt", "qr_receipt"):
+        if template_name in ("logo_receipt", "qr_receipt", "brand_qr_receipt", "barcode_receipt"):
             return self.STRATEGY_BLOCK_STEP_STABLE
         if template_name == "single_shot_plain":
             return self.STRATEGY_SINGLE_SHOT_PLAIN
@@ -327,11 +324,13 @@ class ReceiptBuilder:
         reasons: List[str] = []
 
         if stats.image_block_count > 0:
-            reasons.append(f"当前 receipt 含图片区块（{stats.image_block_count} 个），其中二维码区块 {stats.qr_block_count} 个。")
-            reasons.append("图文混排优先选择 block_step_stable，保证图片块和文本块独立触发更稳。")
+            reasons.append(
+                f"当前 receipt 含图片区块（{stats.image_block_count} 个），其中二维码 {stats.qr_block_count} 个，条形码 {stats.barcode_block_count} 个。"
+            )
+            reasons.append("图文混排优先选择 block_step_stable，保证图片区块和文本区块独立触发更稳。")
             return StrategyRecommendation(
                 strategy=self.STRATEGY_BLOCK_STEP_STABLE,
-                summary="当前内容包含图片/二维码，优先稳定性。",
+                summary="当前内容包含图片/二维码/条形码，优先稳定性。",
                 reasons=reasons,
                 stats=stats,
             )
@@ -346,13 +345,7 @@ class ReceiptBuilder:
             )
 
         if stats.total_chars >= 320 or stats.total_nonempty_lines >= 20 or stats.max_block_chars >= 220:
-            if stats.total_chars >= 320:
-                reasons.append(f"总字符数较多（{stats.total_chars}）。")
-            if stats.total_nonempty_lines >= 20:
-                reasons.append(f"非空行数较多（{stats.total_nonempty_lines}）。")
-            if stats.max_block_chars >= 220:
-                reasons.append(f"存在较大的单块文本（最长 {stats.max_block_chars} 字符）。")
-            reasons.append("优先选择最稳的 block_step_stable。")
+            reasons.append("内容较重，优先选择最稳的 block_step_stable。")
             return StrategyRecommendation(
                 strategy=self.STRATEGY_BLOCK_STEP_STABLE,
                 summary="当前内容偏重，优先稳定性。",
@@ -366,15 +359,7 @@ class ReceiptBuilder:
             or stats.money_block_count >= 1
             or stats.style_transitions >= 2
         ):
-            if stats.centered_block_count >= 1:
-                reasons.append(f"存在居中区块（{stats.centered_block_count} 个）。")
-            if stats.emphasis_block_count >= 1:
-                reasons.append(f"存在重点区/大字区（{stats.emphasis_block_count} 个）。")
-            if stats.money_block_count >= 1:
-                reasons.append(f"存在金额语义区（{stats.money_block_count} 个）。")
-            if stats.style_transitions >= 2:
-                reasons.append(f"样式切换不算少（{stats.style_transitions} 次）。")
-            reasons.append("优先推荐 block_fewer_triggers_style，在减少 trigger 的同时保住样式。")
+            reasons.append("当前内容较依赖样式，优先推荐 block_fewer_triggers_style。")
             return StrategyRecommendation(
                 strategy=self.STRATEGY_BLOCK_FEWER_TRIGGERS_STYLE,
                 summary="当前 receipt 依赖样式表现，优先保样式。",
@@ -403,6 +388,7 @@ class ReceiptBuilder:
         centered_block_count = 0
         image_block_count = 0
         qr_block_count = 0
+        barcode_block_count = 0
 
         prev_style: Optional[BlockStyle] = None
         for block in receipt.blocks:
@@ -410,6 +396,8 @@ class ReceiptBuilder:
                 image_block_count += 1
                 if block.image_kind == "qr":
                     qr_block_count += 1
+                elif block.image_kind == "barcode":
+                    barcode_block_count += 1
                 prev_style = None
                 continue
 
@@ -421,7 +409,6 @@ class ReceiptBuilder:
             joined = "\n".join(block.text_lines)
             max_block_chars = max(max_block_chars, len(joined))
             total_chars += len(joined)
-
             nonempty = [line.strip() for line in block.text_lines if line.strip()]
             total_nonempty_lines += len(nonempty)
 
@@ -446,6 +433,7 @@ class ReceiptBuilder:
             centered_block_count=centered_block_count,
             image_block_count=image_block_count,
             qr_block_count=qr_block_count,
+            barcode_block_count=barcode_block_count,
         )
 
     def _default_form_data(self, template_name: str) -> ReceiptFormData:
@@ -453,7 +441,7 @@ class ReceiptBuilder:
             title="YINJIAN DRINKS",
             date="2026-03-20",
             receipt_no="1234567890",
-            items_text=("COLA 1 3.00\nBREAD 2 5.00\nMILK 1 10.00"),
+            items_text="COLA 1 3.00\nBREAD 2 5.00\nMILK 1 10.00",
             total="23.00",
             cash="50.00",
             change="27.00",
@@ -468,6 +456,9 @@ class ReceiptBuilder:
             qr_size="180",
             qr_border="2",
             qr_error_correction="M",
+            barcode_content="",
+            barcode_width="260",
+            barcode_height="72",
         )
         if template_name == "compact":
             base.items_text = "COLA 1 3.00\nMILK 1 10.00"
@@ -486,24 +477,19 @@ class ReceiptBuilder:
             base.footer = "YINJIAN"
         elif template_name == "logo_receipt":
             base.footer = "SCAN BELOW"
-            base.image_width = "220"
-            base.image_max_height = "96"
         elif template_name == "qr_receipt":
             base.footer = "SCAN TO PAY"
             base.image_width = "180"
             base.image_max_height = "180"
             base.qr_content = "https://example.com/pay/demo-123456"
-            base.qr_size = "180"
-            base.qr_border = "2"
-            base.qr_error_correction = "M"
         elif template_name == "brand_qr_receipt":
-            base.footer = "SCAN TO JOIN"
-            base.image_width = "220"
-            base.image_max_height = "96"
-            base.qr_content = "https://example.com/brand/join"
-            base.qr_size = "180"
-            base.qr_border = "2"
-            base.qr_error_correction = "Q"
+            base.footer = "SCAN TO PAY"
+            base.qr_content = "https://example.com/pay/brand-001"
+        elif template_name == "barcode_receipt":
+            base.footer = "SCAN BARCODE BELOW"
+            base.barcode_content = "SALE-2026-001"
+            base.barcode_width = "260"
+            base.barcode_height = "72"
         return base
 
     @staticmethod
@@ -533,6 +519,9 @@ class ReceiptBuilder:
             qr_size=_value("qr_size", base.qr_size),
             qr_border=_value("qr_border", base.qr_border),
             qr_error_correction=_value("qr_error_correction", base.qr_error_correction),
+            barcode_content=_value("barcode_content", base.barcode_content),
+            barcode_width=_value("barcode_width", base.barcode_width),
+            barcode_height=_value("barcode_height", base.barcode_height),
         )
 
     @staticmethod
@@ -580,20 +569,17 @@ class ReceiptBuilder:
         s = line.strip()
         if not s:
             return "", "", ""
-
         for sep in ("|", "\t", ","):
             if sep in s:
                 parts = [p.strip() for p in s.split(sep) if p.strip()]
                 if len(parts) >= 3:
                     return parts[0], parts[1], parts[2]
-
         parts = s.split()
         if len(parts) >= 3:
             price = parts[-1]
             qty = parts[-2]
             name = " ".join(parts[:-2])
             return name, qty, price
-
         return s, "", ""
 
     def _format_item_rows(self, items_text: str) -> List[str]:
@@ -655,9 +641,23 @@ class ReceiptBuilder:
             parsed = default
         return max(0, min(8, parsed))
 
-    def _parse_qr_error_correction(self, value: str, default: str = "M") -> str:
-        level = str(value).strip().upper() if value is not None else default
-        return level if level in ("L", "M", "Q", "H") else default
+    def _parse_qr_error_correction(self, value: str) -> str:
+        v = str(value).strip().upper()
+        return v if v in ("L", "M", "Q", "H") else "M"
+
+    def _parse_barcode_width(self, value: str, default: int) -> int:
+        try:
+            parsed = int(str(value).strip())
+        except Exception:
+            parsed = default
+        return max(120, min(CommandBuilder.IMAGE_MAX_WIDTH, parsed))
+
+    def _parse_barcode_height(self, value: str, default: int) -> int:
+        try:
+            parsed = int(str(value).strip())
+        except Exception:
+            parsed = default
+        return max(24, min(ImageProcessor.MAX_HEIGHT, parsed))
 
     def _append_optional_logo_block(self, blocks: List[ReceiptBlock], data: ReceiptFormData):
         if data.logo_image_path.strip():
@@ -673,7 +673,19 @@ class ReceiptBuilder:
             )
 
     def _append_optional_footer_visual_block(self, blocks: List[ReceiptBlock], data: ReceiptFormData):
+        barcode_content = data.barcode_content.strip()
         qr_content = data.qr_content.strip()
+
+        if barcode_content:
+            blocks.append(
+                self.barcode_block(
+                    barcode_content,
+                    align="center",
+                    barcode_width=self._parse_barcode_width(data.barcode_width, 260),
+                    barcode_height=self._parse_barcode_height(data.barcode_height, 72),
+                )
+            )
+
         if qr_content:
             blocks.append(
                 self.qr_block(
@@ -681,12 +693,12 @@ class ReceiptBuilder:
                     align="center",
                     qr_size=self._parse_qr_size(data.qr_size, 180),
                     qr_border=self._parse_qr_border(data.qr_border, 2),
-                    qr_error_correction=self._parse_qr_error_correction(data.qr_error_correction, "M"),
+                    qr_error_correction=self._parse_qr_error_correction(data.qr_error_correction),
                 )
             )
             return
 
-        if data.footer_image_path.strip():
+        if (not barcode_content) and data.footer_image_path.strip():
             blocks.append(
                 self.image_block(
                     data.footer_image_path,
@@ -704,7 +716,6 @@ class ReceiptBuilder:
             meta_lines.append(self._pad_lr("DATE", data.date, self.RECEIPT_WIDTH))
         if data.receipt_no:
             meta_lines.append(self._pad_lr("RECEIPT NO", data.receipt_no, self.RECEIPT_WIDTH))
-
         item_lines = self._format_item_rows(data.items_text)
         footer_lines = self._split_nonempty_lines(data.footer) or ["THANK YOU"]
 
@@ -714,26 +725,18 @@ class ReceiptBuilder:
             self.title_block(data.title or "TITLE", scale=2, force_reset_style=True),
             self.center_block(["SALES RECEIPT"], scale=1),
         ])
-
         if meta_lines:
             blocks.append(self.text_block(meta_lines, align="left", scale=1, force_reset_style=True))
-
         blocks.extend([
             self.rule_block(),
-            self.text_block([
-                f"{'ITEM':<{self.ITEM_NAME_WIDTH}}{'QTY':>{self.ITEM_QTY_WIDTH}}{'PRICE':>{self.ITEM_PRICE_WIDTH}}"
-            ], align="left", scale=1, force_reset_style=True),
+            self.text_block([f"{'ITEM':<{self.ITEM_NAME_WIDTH}}{'QTY':>{self.ITEM_QTY_WIDTH}}{'PRICE':>{self.ITEM_PRICE_WIDTH}}"], align="left", scale=1, force_reset_style=True),
             self.rule_block(),
         ])
-
         if item_lines:
             blocks.append(self.text_block(item_lines, align="left", scale=1))
-
         blocks.append(self.rule_block())
-
         if data.total:
             blocks.append(self.center_block([f"TOTAL {data.total}"], scale=2, force_reset_style=True))
-
         money_lines: List[str] = []
         if data.cash:
             money_lines.append(self._format_money_line("CASH", data.cash))
@@ -741,14 +744,12 @@ class ReceiptBuilder:
             money_lines.append(self._format_money_line("CHANGE", data.change))
         if money_lines:
             blocks.append(self.text_block(money_lines, align="left", scale=1, force_reset_style=True))
-
         blocks.append(self.rule_block())
         blocks.append(self.center_block(footer_lines, scale=1, force_reset_style=True))
         self._append_optional_footer_visual_block(blocks, data)
-
         return Receipt(
             name="default",
-            description="标准测试票：支持标题/明细/尾部排版，也支持可选顶部 Logo、底部图片或底部二维码。",
+            description="标准测试票：支持标题/明细/尾部排版，也支持 Logo、底部图片、二维码、条形码。",
             blocks=blocks,
         )
 
@@ -758,7 +759,6 @@ class ReceiptBuilder:
             meta_lines.append(data.date)
         if data.receipt_no:
             meta_lines.append(f"NO {data.receipt_no}")
-
         blocks: List[ReceiptBlock] = []
         self._append_optional_logo_block(blocks, data)
         blocks.append(self.title_block(data.title or "TITLE", scale=2, force_reset_style=True))
@@ -771,12 +771,7 @@ class ReceiptBuilder:
             blocks.append(self.rule_block())
             blocks.append(self.center_block(self._split_nonempty_lines(data.footer), scale=1, force_reset_style=True))
         self._append_optional_footer_visual_block(blocks, data)
-
-        return Receipt(
-            name="compact",
-            description="紧凑模板：适合快速看标题/总价/结束语，也支持可选图片或二维码。",
-            blocks=blocks,
-        )
+        return Receipt(name="compact", description="紧凑模板，也支持图片/二维码/条形码。", blocks=blocks)
 
     def _build_simple_center_receipt(self, data: ReceiptFormData) -> Receipt:
         center_lines = self._split_nonempty_lines(data.items_text) or ["WELCOME"]
@@ -790,31 +785,23 @@ class ReceiptBuilder:
             self.center_block(footer_lines, scale=1, force_reset_style=True),
         ])
         self._append_optional_footer_visual_block(blocks, data)
-        return Receipt(
-            name="simple_center",
-            description="最小模板：验证标题、正文、尾部以及可选图片区块。",
-            blocks=blocks,
-        )
+        return Receipt(name="simple_center", description="最小模板，也支持图片/二维码/条形码。", blocks=blocks)
 
     def _build_single_shot_plain_receipt(self, data: ReceiptFormData) -> Receipt:
         lines: List[str] = []
         title = data.title.strip() if data.title else "TITLE"
         lines.append(self._center_text_visual(title, self.RECEIPT_WIDTH))
         lines.append(self._center_text_visual("SALES RECEIPT", self.RECEIPT_WIDTH))
-
         if data.date:
             lines.append(self._pad_lr("DATE", data.date, self.RECEIPT_WIDTH))
         if data.receipt_no:
             lines.append(self._pad_lr("RECEIPT NO", data.receipt_no, self.RECEIPT_WIDTH))
-
         lines.append(self._HR)
         lines.append(f"{'ITEM':<{self.ITEM_NAME_WIDTH}}{'QTY':>{self.ITEM_QTY_WIDTH}}{'PRICE':>{self.ITEM_PRICE_WIDTH}}")
         lines.append(self._HR)
-
         item_rows = self._format_item_rows(data.items_text)
         if item_rows:
             lines.extend(item_rows)
-
         lines.append(self._HR)
         if data.total:
             lines.append(self._center_text_visual(f"TOTAL {data.total}", self.RECEIPT_WIDTH))
@@ -823,16 +810,14 @@ class ReceiptBuilder:
         if data.change:
             lines.append(self._format_money_line("CHANGE", data.change))
         lines.append(self._HR)
-
         footer_lines = self._split_nonempty_lines(data.footer)
         if footer_lines:
             for line in footer_lines:
                 lines.append(self._center_text_visual(line, self.RECEIPT_WIDTH))
-
         lines = self._refine_plain_money_section(lines)
         return Receipt(
             name="single_shot_plain",
-            description="兼容保留的实验模板：整票平铺为 plain-text 大块；含图片时会自动退回稳定策略。",
+            description="兼容保留的实验模板：整票平铺为 plain-text 大块；含图片区块时会自动退回稳定策略。",
             blocks=[self.text_block(lines, align="left", scale=1, line_spacing=0, margin_left=0, margin_right=0, trigger_print=True, force_reset_style=True)],
         )
 
@@ -851,18 +836,16 @@ class ReceiptBuilder:
         footer_lines = self._split_nonempty_lines(data.footer) or ["THANK YOU"]
         blocks.extend([self.rule_block(), self.center_block(footer_lines, scale=1, force_reset_style=True)])
         self._append_optional_footer_visual_block(blocks, data)
-        return Receipt(
-            name="logo_receipt",
-            description="图文混排模板：顶部 Logo + 文本正文，可选底部二维码或图片。",
-            blocks=blocks,
-        )
+        return Receipt(name="logo_receipt", description="顶部 Logo + 文本正文，可选底部二维码/条形码/图片。", blocks=blocks)
 
     def _build_qr_receipt(self, data: ReceiptFormData) -> Receipt:
-        blocks: List[ReceiptBlock] = [
+        blocks: List[ReceiptBlock] = []
+        self._append_optional_logo_block(blocks, data)
+        blocks.extend([
             self.title_block(data.title or "TITLE", scale=2, force_reset_style=True),
             self.center_block(["SCAN TO PAY"], scale=1),
             self.rule_block(),
-        ]
+        ])
         item_lines = self._format_item_rows(data.items_text)
         if item_lines:
             blocks.append(self.text_block(item_lines, align="left", scale=1))
@@ -871,57 +854,47 @@ class ReceiptBuilder:
         footer_lines = self._split_nonempty_lines(data.footer) or ["SCAN BELOW"]
         blocks.append(self.center_block(footer_lines, scale=1, force_reset_style=True))
         self._append_optional_footer_visual_block(blocks, data)
-        return Receipt(
-            name="qr_receipt",
-            description="图文混排模板：底部内置二维码优先，其次可用外部底图。",
-            blocks=blocks,
-        )
+        return Receipt(name="qr_receipt", description="底部二维码模板，可选顶部 Logo 和底部条形码。", blocks=blocks)
 
     def _build_brand_qr_receipt(self, data: ReceiptFormData) -> Receipt:
         blocks: List[ReceiptBlock] = []
         self._append_optional_logo_block(blocks, data)
         blocks.extend([
             self.title_block(data.title or "TITLE", scale=2, force_reset_style=True),
-            self.center_block(["BRAND SERVICE"], scale=1),
+            self.center_block(["BRAND + QR RECEIPT"], scale=1),
             self.rule_block(),
         ])
-
-        meta_lines: List[str] = []
-        if data.date:
-            meta_lines.append(self._pad_lr("DATE", data.date, self.RECEIPT_WIDTH))
-        if data.receipt_no:
-            meta_lines.append(self._pad_lr("RECEIPT NO", data.receipt_no, self.RECEIPT_WIDTH))
-        if meta_lines:
-            blocks.append(self.text_block(meta_lines, align="left", scale=1, force_reset_style=True))
-
         item_lines = self._format_item_rows(data.items_text)
         if item_lines:
-            blocks.extend([self.rule_block(), self.text_block(item_lines, align="left", scale=1)])
-
+            blocks.append(self.text_block(item_lines, align="left", scale=1))
         if data.total:
             blocks.extend([self.rule_block(), self.center_block([f"TOTAL {data.total}"], scale=2, force_reset_style=True)])
-
-        footer_lines = self._split_nonempty_lines(data.footer) or ["SCAN TO JOIN"]
+        footer_lines = self._split_nonempty_lines(data.footer) or ["SCAN BELOW"]
         blocks.append(self.center_block(footer_lines, scale=1, force_reset_style=True))
         self._append_optional_footer_visual_block(blocks, data)
-        return Receipt(
-            name="brand_qr_receipt",
-            description="品牌模板：顶部 Logo + 正文 + 底部二维码/图片。",
-            blocks=blocks,
-        )
+        return Receipt(name="brand_qr_receipt", description="顶部 Logo + 文本 + 底部二维码/条形码。", blocks=blocks)
+
+    def _build_barcode_receipt(self, data: ReceiptFormData) -> Receipt:
+        blocks: List[ReceiptBlock] = []
+        self._append_optional_logo_block(blocks, data)
+        blocks.extend([
+            self.title_block(data.title or "TITLE", scale=2, force_reset_style=True),
+            self.center_block(["BARCODE RECEIPT"], scale=1),
+            self.rule_block(),
+        ])
+        item_lines = self._format_item_rows(data.items_text)
+        if item_lines:
+            blocks.append(self.text_block(item_lines, align="left", scale=1))
+        if data.total:
+            blocks.extend([self.rule_block(), self.center_block([f"TOTAL {data.total}"], scale=2, force_reset_style=True)])
+        footer_lines = self._split_nonempty_lines(data.footer) or ["SCAN BARCODE BELOW"]
+        blocks.append(self.center_block(footer_lines, scale=1, force_reset_style=True))
+        self._append_optional_footer_visual_block(blocks, data)
+        return Receipt(name="barcode_receipt", description="底部条形码模板，可选 Logo、二维码、图片。", blocks=blocks)
 
     def title_block(self, text: str, *, scale: int = 2, line_spacing: Optional[int] = 0, force_reset_style: bool = False) -> ReceiptBlock:
-        return ReceiptBlock(
-            block_type="text",
-            text_lines=[text],
-            align="center",
-            scale=scale,
-            line_spacing=line_spacing,
-            margin_left=0,
-            margin_right=0,
-            trigger_print=True,
-            force_reset_style=force_reset_style,
-        )
+        return ReceiptBlock(block_type="text", text_lines=[text], align="center", scale=scale, line_spacing=line_spacing,
+                            margin_left=0, margin_right=0, trigger_print=True, force_reset_style=force_reset_style)
 
     def rule_block(self) -> ReceiptBlock:
         return self.text_block([self._HR], align="left", scale=1, force_reset_style=True)
@@ -929,75 +902,36 @@ class ReceiptBuilder:
     def center_block(self, lines: List[str], *, scale: int = 1, line_spacing: Optional[int] = 0, force_reset_style: bool = False) -> ReceiptBlock:
         return self.text_block(lines, align="center", scale=scale, line_spacing=line_spacing, force_reset_style=force_reset_style)
 
-    def text_block(
-        self,
-        lines: List[str],
-        *,
-        align: str = "left",
-        scale: int = 1,
-        line_spacing: Optional[int] = 0,
-        margin_left: Optional[int] = 0,
-        margin_right: Optional[int] = 0,
-        trigger_print: bool = True,
-        force_reset_style: bool = False,
-    ) -> ReceiptBlock:
+    def text_block(self, lines: List[str], *, align: str = "left", scale: int = 1, line_spacing: Optional[int] = 0,
+                   margin_left: Optional[int] = 0, margin_right: Optional[int] = 0, trigger_print: bool = True,
+                   force_reset_style: bool = False) -> ReceiptBlock:
         return ReceiptBlock(
-            block_type="text",
-            text_lines=lines,
-            align=align,
-            scale=scale,
-            line_spacing=line_spacing,
-            margin_left=margin_left,
-            margin_right=margin_right,
-            trigger_print=trigger_print,
-            force_reset_style=force_reset_style,
+            block_type="text", text_lines=lines, align=align, scale=scale, line_spacing=line_spacing,
+            margin_left=margin_left, margin_right=margin_right, trigger_print=trigger_print, force_reset_style=force_reset_style
         )
 
-    def image_block(
-        self,
-        image_path: str,
-        *,
-        align: str = "center",
-        image_width: int = 220,
-        image_max_height: int = 96,
-        image_threshold: Optional[int] = None,
-        image_dither: bool = True,
-        trigger_print: bool = True,
-    ) -> ReceiptBlock:
+    def image_block(self, image_path: str, *, align: str = "center", image_width: int = 220, image_max_height: int = 96,
+                    image_threshold: Optional[int] = None, image_dither: bool = True, trigger_print: bool = True) -> ReceiptBlock:
         return ReceiptBlock(
-            block_type="image",
-            align=align,
-            trigger_print=trigger_print,
-            image_path=image_path.strip(),
-            image_width=image_width,
-            image_max_height=image_max_height,
-            image_threshold=image_threshold,
-            image_dither=image_dither,
-            image_kind="file",
+            block_type="image", align=align, trigger_print=trigger_print, image_path=image_path.strip(),
+            image_width=image_width, image_max_height=image_max_height, image_threshold=image_threshold,
+            image_dither=image_dither, image_kind="file"
         )
 
-    def qr_block(
-        self,
-        qr_content: str,
-        *,
-        align: str = "center",
-        qr_size: int = 180,
-        qr_border: int = 2,
-        qr_error_correction: str = "M",
-        trigger_print: bool = True,
-    ) -> ReceiptBlock:
+    def qr_block(self, qr_content: str, *, align: str = "center", qr_size: int = 180, qr_border: int = 2,
+                 qr_error_correction: str = "M", trigger_print: bool = True) -> ReceiptBlock:
         return ReceiptBlock(
-            block_type="image",
-            align=align,
-            trigger_print=trigger_print,
-            image_kind="qr",
-            qr_content=qr_content.strip(),
-            qr_size=qr_size,
-            qr_border=qr_border,
-            qr_error_correction=qr_error_correction,
-            image_width=qr_size,
-            image_max_height=qr_size,
-            image_dither=False,
+            block_type="image", align=align, trigger_print=trigger_print, image_kind="qr",
+            qr_content=qr_content.strip(), qr_size=qr_size, qr_border=qr_border,
+            qr_error_correction=qr_error_correction, image_width=qr_size, image_max_height=qr_size, image_dither=False
+        )
+
+    def barcode_block(self, barcode_content: str, *, align: str = "center", barcode_width: int = 260,
+                      barcode_height: int = 72, trigger_print: bool = True) -> ReceiptBlock:
+        return ReceiptBlock(
+            block_type="image", align=align, trigger_print=trigger_print, image_kind="barcode",
+            barcode_content=barcode_content.strip(), barcode_width=barcode_width, barcode_height=barcode_height,
+            image_width=barcode_width, image_max_height=barcode_height, image_dither=False
         )
 
     def _normalize_style(self, block: ReceiptBlock) -> BlockStyle:
@@ -1012,7 +946,6 @@ class ReceiptBuilder:
     def _encode_text_block(self, block: ReceiptBlock, last_style: Optional[BlockStyle]) -> tuple[List[SendStep], BlockStyle]:
         steps: List[SendStep] = []
         style = self._normalize_style(block)
-
         if block.force_reset_style:
             last_style = None
 
@@ -1048,6 +981,15 @@ class ReceiptBuilder:
                 block.qr_content,
                 target_size=max(32, min(ImageProcessor.MAX_QR_SIZE, int(block.qr_size))),
                 qr_border=max(0, min(8, int(block.qr_border))),
+                error_correction=str(block.qr_error_correction).strip().upper() or "M",
+                canvas_width=CommandBuilder.IMAGE_MAX_WIDTH,
+                align=block.align,
+            )
+        elif block.image_kind == "barcode":
+            prepared = ImageProcessor.prepare_barcode_text(
+                block.barcode_content,
+                target_width=max(120, min(CommandBuilder.IMAGE_MAX_WIDTH, int(block.barcode_width))),
+                target_height=max(24, min(ImageProcessor.MAX_HEIGHT, int(block.barcode_height))),
                 canvas_width=CommandBuilder.IMAGE_MAX_WIDTH,
                 align=block.align,
             )
@@ -1121,7 +1063,6 @@ class ReceiptBuilder:
     def _merge_adjacent_same_style_blocks_mixed(self, blocks: List[ReceiptBlock]) -> List[ReceiptBlock]:
         if not blocks:
             return []
-
         merged: List[ReceiptBlock] = []
         current: Optional[ReceiptBlock] = None
         current_style: Optional[BlockStyle] = None
@@ -1192,19 +1133,16 @@ class ReceiptBuilder:
         if block.scale >= 2:
             return True
         nonempty = [line.strip() for line in block.text_lines if line.strip()]
-        if block.align == "center" and 0 < len(nonempty) <= 2:
-            return True
-        return False
+        return block.align == "center" and 0 < len(nonempty) <= 2
 
     def _refine_plain_money_section(self, lines: List[str]) -> List[str]:
         if not lines:
             return lines
-
         result: List[str] = []
         for idx, line in enumerate(lines):
             stripped = line.strip().upper()
             if stripped.startswith("TOTAL "):
-                if result and result[-1].strip() != "" and result[-1].strip() != self._HR:
+                if result and result[-1].strip() not in ("", self._HR):
                     result.append("")
                 result.append(line)
                 if idx + 1 < len(lines):
@@ -1227,7 +1165,6 @@ class ReceiptBuilder:
             else:
                 blank_run = 0
                 compact.append(line)
-
         while compact and compact[0].strip() == "":
             compact.pop(0)
         while compact and compact[-1].strip() == "":

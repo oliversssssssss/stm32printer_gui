@@ -19,7 +19,10 @@
       "qr_content": "ababababbaba",
       "qr_size": "180",
       "qr_border": "2",
-      "qr_error_correction": "M"
+      "qr_error_correction": "M",
+      "barcode_content": "123123123123",
+      "barcode_width": "260",
+      "barcode_height": "72"
     },
     "qr_receipt": {
       "title": "YINJIAN DRINKS",
